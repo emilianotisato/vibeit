@@ -166,6 +166,16 @@ func getWorkspaceInfo(path string, repo *git.Repository, isWorktree bool) (Works
 
 // GetProjectName returns the name of the project based on the repo root
 func GetProjectName() (string, error) {
+	path, err := GetProjectPath()
+	if err != nil {
+		cwd, _ := os.Getwd()
+		return filepath.Base(cwd), err
+	}
+	return filepath.Base(path), nil
+}
+
+// GetProjectPath returns the root path of the main repository
+func GetProjectPath() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
@@ -175,13 +185,40 @@ func GetProjectName() (string, error) {
 		DetectDotGit: true,
 	})
 	if err != nil {
-		return filepath.Base(cwd), nil
+		return cwd, err
 	}
 
 	wt, err := repo.Worktree()
 	if err != nil {
-		return filepath.Base(cwd), nil
+		return cwd, err
 	}
 
-	return filepath.Base(wt.Filesystem.Root()), nil
+	// Get the root path
+	root := wt.Filesystem.Root()
+
+	// If we're in a worktree, find the main repo
+	gitPath := filepath.Join(root, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return root, nil
+	}
+
+	if !info.IsDir() {
+		// .git is a file, we're in a worktree
+		// Read it to find the main repo
+		content, err := os.ReadFile(gitPath)
+		if err != nil {
+			return root, nil
+		}
+		line := strings.TrimSpace(string(content))
+		if strings.HasPrefix(line, "gitdir: ") {
+			gitDir := strings.TrimPrefix(line, "gitdir: ")
+			// Go up from .git/worktrees/<name> to the main repo
+			// gitDir is like /path/to/main/.git/worktrees/<name>
+			mainGit := filepath.Dir(filepath.Dir(gitDir))
+			return filepath.Dir(mainGit), nil
+		}
+	}
+
+	return root, nil
 }
