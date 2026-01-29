@@ -22,7 +22,6 @@ const (
 	modalNone modalType = iota
 	modalNewWorktree
 	modalDeleteWorktree
-	modalNewTab
 )
 
 // Styles
@@ -95,26 +94,22 @@ var (
 
 	successStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("46"))
-
-	menuItemStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252"))
-
-	menuSelectedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("212")).
-				Bold(true)
 )
 
 type keyMap struct {
-	Quit       key.Binding
-	NextTab    key.Binding
-	PrevTab    key.Binding
-	NewTerm    key.Binding
-	Git        key.Binding
-	Notes      key.Binding
-	Worktree   key.Binding
-	Delete     key.Binding
-	Enter      key.Binding
-	CommandKey key.Binding
+	Quit        key.Binding
+	NextTab     key.Binding
+	PrevTab     key.Binding
+	Terminal    key.Binding
+	Git         key.Binding
+	Claude      key.Binding
+	Codex       key.Binding
+	Notes       key.Binding
+	Worktree    key.Binding
+	Delete      key.Binding
+	KillSession key.Binding
+	Enter       key.Binding
+	CommandKey  key.Binding
 }
 
 var keys = keyMap{
@@ -130,13 +125,21 @@ var keys = keyMap{
 		key.WithKeys("shift+tab", "h"),
 		key.WithHelp("S-tab", "prev workspace"),
 	),
-	NewTerm: key.NewBinding(
+	Terminal: key.NewBinding(
 		key.WithKeys("t"),
-		key.WithHelp("t", "new tab"),
+		key.WithHelp("t", "terminal"),
 	),
 	Git: key.NewBinding(
 		key.WithKeys("g"),
 		key.WithHelp("g", "lazygit"),
+	),
+	Claude: key.NewBinding(
+		key.WithKeys("c"),
+		key.WithHelp("c", "claude"),
+	),
+	Codex: key.NewBinding(
+		key.WithKeys("x"),
+		key.WithHelp("x", "codex"),
 	),
 	Notes: key.NewBinding(
 		key.WithKeys("n"),
@@ -150,9 +153,13 @@ var keys = keyMap{
 		key.WithKeys("d"),
 		key.WithHelp("d", "delete worktree"),
 	),
+	KillSession: key.NewBinding(
+		key.WithKeys("k"),
+		key.WithHelp("k", "kill session"),
+	),
 	Enter: key.NewBinding(
 		key.WithKeys("enter"),
-		key.WithHelp("enter", "open session"),
+		key.WithHelp("enter", "session"),
 	),
 	CommandKey: key.NewBinding(
 		key.WithKeys("ctrl+\\"),
@@ -160,19 +167,6 @@ var keys = keyMap{
 	),
 }
 
-// Tab menu options
-type tabOption struct {
-	label   string
-	tabType mux.TabType
-	key     string
-}
-
-var tabOptions = []tabOption{
-	{label: "Terminal", tabType: mux.TabTerminal, key: "t"},
-	{label: "Lazygit", tabType: mux.TabLazygit, key: "g"},
-	{label: "Claude", tabType: mux.TabClaude, key: "c"},
-	{label: "Codex", tabType: mux.TabCodex, key: "x"},
-}
 
 type Model struct {
 	projectName   string
@@ -193,9 +187,6 @@ type Model struct {
 	// Delete confirmation
 	deleteConfirm bool
 	deleteNotes   bool
-
-	// Tab menu selection
-	tabMenuIdx int
 }
 
 func initialModel() Model {
@@ -344,20 +335,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, keys.Enter):
-			// Open zellij session for current workspace
+			// Attach to existing session
+			if len(m.workspaces) > 0 {
+				return m.attachSession()
+			}
+
+		case key.Matches(msg, keys.Terminal):
+			// Open terminal tab
 			if len(m.workspaces) > 0 {
 				return m.openSession(mux.TabTerminal)
 			}
 
-		case key.Matches(msg, keys.NewTerm):
-			// Show tab type selection modal
-			m.modal = modalNewTab
-			m.tabMenuIdx = 0
-			m.modalError = ""
-
 		case key.Matches(msg, keys.Git):
+			// Open lazygit directly
 			if len(m.workspaces) > 0 {
 				return m.openSession(mux.TabLazygit)
+			}
+
+		case key.Matches(msg, keys.Claude):
+			// Open claude directly
+			if len(m.workspaces) > 0 {
+				return m.openSession(mux.TabClaude)
+			}
+
+		case key.Matches(msg, keys.Codex):
+			// Open codex directly
+			if len(m.workspaces) > 0 {
+				return m.openSession(mux.TabCodex)
 			}
 
 		case key.Matches(msg, keys.Notes):
@@ -385,6 +389,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
+		case key.Matches(msg, keys.KillSession):
+			if len(m.workspaces) > 0 {
+				ws := m.workspaces[m.activeIdx]
+				sessionName := mux.SessionName(m.projectName, ws.Name)
+				if err := mux.DeleteSession(sessionName); err != nil {
+					m.statusMessage = errorStyle.Render(fmt.Sprintf("Failed to kill session: %v", err))
+				} else {
+					m.statusMessage = successStyle.Render(fmt.Sprintf("Killed session: %s", sessionName))
+				}
+			}
+
 		case msg.String() >= "1" && msg.String() <= "9":
 			idx := int(msg.String()[0] - '1')
 			if idx < len(m.workspaces) {
@@ -396,6 +411,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) attachSession() (tea.Model, tea.Cmd) {
+	if !mux.IsZellijInstalled() {
+		m.statusMessage = errorStyle.Render("zellij not installed. Run 'vibeit doctor' for help.")
+		return m, nil
+	}
+
+	ws := m.workspaces[m.activeIdx]
+	sessionName := mux.SessionName(m.projectName, ws.Name)
+
+	cmd := mux.AttachOrCreateCmd(sessionName, ws.Path)
+	return m, runExternalCmd(cmd)
+}
+
 func (m Model) openSession(tabType mux.TabType) (tea.Model, tea.Cmd) {
 	if !mux.IsZellijInstalled() {
 		m.statusMessage = errorStyle.Render("zellij not installed. Run 'vibeit doctor' for help.")
@@ -405,9 +433,7 @@ func (m Model) openSession(tabType mux.TabType) (tea.Model, tea.Cmd) {
 	ws := m.workspaces[m.activeIdx]
 	sessionName := mux.SessionName(m.projectName, ws.Name)
 
-	// Use attach --create which handles both cases
-	cmd := mux.AttachOrCreateCmd(sessionName, ws.Path)
-	cmd.Dir = ws.Path
+	cmd := mux.OpenWithCommand(sessionName, ws.Path, tabType)
 	return m, runExternalCmd(cmd)
 }
 
@@ -467,36 +493,6 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-
-	case modalNewTab:
-		switch msg.String() {
-		case "esc":
-			m.modal = modalNone
-			return m, nil
-		case "up", "k":
-			if m.tabMenuIdx > 0 {
-				m.tabMenuIdx--
-			}
-		case "down", "j":
-			if m.tabMenuIdx < len(tabOptions)-1 {
-				m.tabMenuIdx++
-			}
-		case "enter":
-			m.modal = modalNone
-			return m.openSession(tabOptions[m.tabMenuIdx].tabType)
-		case "t":
-			m.modal = modalNone
-			return m.openSession(mux.TabTerminal)
-		case "g":
-			m.modal = modalNone
-			return m.openSession(mux.TabLazygit)
-		case "c":
-			m.modal = modalNone
-			return m.openSession(mux.TabClaude)
-		case "x":
-			m.modal = modalNone
-			return m.openSession(mux.TabCodex)
-		}
 	}
 
 	return m, nil
@@ -536,8 +532,6 @@ func (m Model) renderWithModal(background string) string {
 		modal = m.renderNewWorktreeModal()
 	case modalDeleteWorktree:
 		modal = m.renderDeleteWorktreeModal()
-	case modalNewTab:
-		modal = m.renderNewTabModal()
 	}
 
 	lines := strings.Split(background, "\n")
@@ -611,34 +605,6 @@ func (m Model) renderDeleteWorktreeModal() string {
 		content.WriteString("\n")
 		content.WriteString(modalHintStyle.Render("N to toggle • Y to delete"))
 	}
-
-	return modalStyle.Render(content.String())
-}
-
-func (m Model) renderNewTabModal() string {
-	var content strings.Builder
-
-	content.WriteString(modalTitleStyle.Render("Open Tab"))
-	content.WriteString("\n\n")
-
-	for i, opt := range tabOptions {
-		prefix := "  "
-		style := menuItemStyle
-		if i == m.tabMenuIdx {
-			prefix = "> "
-			style = menuSelectedStyle
-		}
-		content.WriteString(style.Render(fmt.Sprintf("%s[%s] %s", prefix, opt.key, opt.label)))
-		content.WriteString("\n")
-	}
-
-	if m.modalError != "" {
-		content.WriteString("\n")
-		content.WriteString(errorStyle.Render(m.modalError))
-	}
-
-	content.WriteString("\n")
-	content.WriteString(modalHintStyle.Render("Enter/key to open • Esc to cancel"))
 
 	return modalStyle.Render(content.String())
 }
@@ -722,7 +688,7 @@ func (m Model) renderMainContent(height int) string {
 		sessionStatus,
 		statusLine,
 		sessionHint,
-		helpTextStyle.Render("Enter:session  t:new tab  g:lazygit  n:notes  w:worktree  d:delete  q:quit"),
+		helpTextStyle.Render("g:lazygit  c:claude  x:codex  t:terminal  n:notes  w:worktree  Enter:attach"),
 	)
 
 	lines := strings.Split(content, "\n")
@@ -745,12 +711,14 @@ func (m Model) renderFooter() string {
 		key  string
 		desc string
 	}{
-		{"Enter", "session"},
-		{"t", "tab"},
-		{"g", "git"},
+		{"g", "lazygit"},
+		{"c", "claude"},
+		{"x", "codex"},
+		{"t", "term"},
 		{"n", "notes"},
-		{"w", "worktree"},
-		{"d", "delete"},
+		{"w", "new wt"},
+		{"d", "del wt"},
+		{"k", "kill ses"},
 		{"q", "quit"},
 	}
 
