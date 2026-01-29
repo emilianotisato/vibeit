@@ -22,6 +22,8 @@ const (
 	modalNone modalType = iota
 	modalNewWorktree
 	modalDeleteWorktree
+	modalTabPicker
+	modalTabTypePicker
 )
 
 // Styles
@@ -89,6 +91,14 @@ var (
 			Foreground(lipgloss.Color("241")).
 			MarginTop(1)
 
+	modalItemStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252"))
+
+	modalItemSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("62")).
+				Bold(true)
+
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
 
@@ -104,6 +114,7 @@ type keyMap struct {
 	Git         key.Binding
 	Claude      key.Binding
 	Codex       key.Binding
+	Neovim      key.Binding
 	Notes       key.Binding
 	Worktree    key.Binding
 	Delete      key.Binding
@@ -141,6 +152,10 @@ var keys = keyMap{
 		key.WithKeys("x"),
 		key.WithHelp("x", "codex"),
 	),
+	Neovim: key.NewBinding(
+		key.WithKeys("v"),
+		key.WithHelp("v", "nvim"),
+	),
 	Notes: key.NewBinding(
 		key.WithKeys("n"),
 		key.WithHelp("n", "notes"),
@@ -159,7 +174,7 @@ var keys = keyMap{
 	),
 	Enter: key.NewBinding(
 		key.WithKeys("enter"),
-		key.WithHelp("enter", "session"),
+		key.WithHelp("enter", "tabs"),
 	),
 	CommandKey: key.NewBinding(
 		key.WithKeys("ctrl+\\"),
@@ -187,6 +202,13 @@ type Model struct {
 	// Delete confirmation
 	deleteConfirm bool
 	deleteNotes   bool
+
+	// Tab picker
+	tabPickerTabs    []string
+	tabPickerIdx     int
+	tabPickerFilter  mux.TabType
+	tabPickerSession string
+	tabTypePickerIdx int
 }
 
 func initialModel() Model {
@@ -335,33 +357,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, keys.Enter):
-			// Attach to existing session
+			// Show all managed tabs
 			if len(m.workspaces) > 0 {
-				return m.attachSession()
+				return m.showTabPicker(mux.TabType(""))
 			}
 
 		case key.Matches(msg, keys.Terminal):
-			// Open terminal tab
+			// Multi-instance terminal tabs
 			if len(m.workspaces) > 0 {
-				return m.openSession(mux.TabTerminal)
+				return m.showTabPicker(mux.TabTerminal)
 			}
 
 		case key.Matches(msg, keys.Git):
-			// Open lazygit directly
+			// Single-instance lazygit
 			if len(m.workspaces) > 0 {
-				return m.openSession(mux.TabLazygit)
+				return m.openSingleTab(mux.TabLazygit)
 			}
 
 		case key.Matches(msg, keys.Claude):
-			// Open claude directly
+			// Multi-instance claude tabs
 			if len(m.workspaces) > 0 {
-				return m.openSession(mux.TabClaude)
+				return m.showTabPicker(mux.TabClaude)
 			}
 
 		case key.Matches(msg, keys.Codex):
-			// Open codex directly
+			// Multi-instance codex tabs
 			if len(m.workspaces) > 0 {
-				return m.openSession(mux.TabCodex)
+				return m.showTabPicker(mux.TabCodex)
+			}
+
+		case key.Matches(msg, keys.Neovim):
+			// Multi-instance nvim tabs
+			if len(m.workspaces) > 0 {
+				return m.showTabPicker(mux.TabNeovim)
 			}
 
 		case key.Matches(msg, keys.Notes):
@@ -437,6 +465,52 @@ func (m Model) openSession(tabType mux.TabType) (tea.Model, tea.Cmd) {
 	return m, runExternalCmd(cmd)
 }
 
+func (m Model) openSingleTab(tabType mux.TabType) (tea.Model, tea.Cmd) {
+	if !mux.IsTmuxInstalled() {
+		m.statusMessage = errorStyle.Render("tmux not installed. Run 'vibeit doctor' for help.")
+		return m, nil
+	}
+
+	ws := m.workspaces[m.activeIdx]
+	sessionName := mux.SessionName(m.projectName, ws.Name)
+	cmd := mux.GoToOrCreateSingleTabCmd(sessionName, ws.Path, tabType)
+	return m, runExternalCmd(cmd)
+}
+
+func (m Model) showTabPicker(filter mux.TabType) (tea.Model, tea.Cmd) {
+	if !mux.IsTmuxInstalled() {
+		m.statusMessage = errorStyle.Render("tmux not installed. Run 'vibeit doctor' for help.")
+		return m, nil
+	}
+
+	ws := m.workspaces[m.activeIdx]
+	sessionName := mux.SessionName(m.projectName, ws.Name)
+
+	var tabs []string
+	if mux.SessionExists(sessionName) {
+		var err error
+		tabs, err = mux.QueryTabNames(sessionName)
+		if err != nil {
+			m.statusMessage = errorStyle.Render(fmt.Sprintf("Failed to query tabs: %v", err))
+			return m, nil
+		}
+	}
+
+	if filter != "" {
+		tabs = mux.FilterTabsByPrefix(tabs, string(filter))
+	} else {
+		tabs = filterManagedTabs(tabs)
+	}
+
+	m.tabPickerTabs = tabs
+	m.tabPickerIdx = 0
+	m.tabPickerFilter = filter
+	m.tabPickerSession = sessionName
+	m.modal = modalTabPicker
+
+	return m, nil
+}
+
 func (m Model) openNotes() (tea.Model, tea.Cmd) {
 	ws := m.workspaces[m.activeIdx]
 	parentDir := filepath.Dir(m.projectPath)
@@ -494,6 +568,116 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+
+	case modalTabPicker:
+		return m.handleTabPickerInput(msg)
+
+	case modalTabTypePicker:
+		return m.handleTabTypePickerInput(msg)
+	}
+
+	return m, nil
+}
+
+func (m Model) tabPickerNewLabel() string {
+	if m.tabPickerFilter == "" {
+		return "New..."
+	}
+	return fmt.Sprintf("New %s", m.tabPickerFilter)
+}
+
+func (m Model) handleTabPickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ws := m.workspaces[m.activeIdx]
+
+	switch msg.String() {
+	case "esc":
+		m.modal = modalNone
+		return m, nil
+
+	case "up", "k":
+		if m.tabPickerIdx > 0 {
+			m.tabPickerIdx--
+		}
+		return m, nil
+
+	case "down", "j":
+		// +1 for "New" option
+		if m.tabPickerIdx < len(m.tabPickerTabs) {
+			m.tabPickerIdx++
+		}
+		return m, nil
+
+	case "enter":
+		m.modal = modalNone
+
+		// Check if "New" option is selected (last item)
+		if m.tabPickerIdx == len(m.tabPickerTabs) {
+			if m.tabPickerFilter == "" {
+				m.modal = modalTabTypePicker
+				m.tabTypePickerIdx = 0
+				return m, nil
+			}
+
+			tabName := mux.NextTabName(m.tabPickerTabs, m.tabPickerFilter)
+			cmd := mux.NewTabCmd(m.tabPickerSession, ws.Path, tabName, m.tabPickerFilter)
+			return m, runExternalCmd(cmd)
+		}
+
+		// Go to selected existing tab
+		tabName := m.tabPickerTabs[m.tabPickerIdx]
+		cmd := mux.GoToTabCmd(m.tabPickerSession, ws.Path, tabName)
+		return m, runExternalCmd(cmd)
+
+	// Quick select by number
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		idx := int(msg.String()[0] - '1')
+		// +1 because last item is "New"
+		if idx <= len(m.tabPickerTabs) {
+			m.tabPickerIdx = idx
+			// Trigger enter
+			return m.handleTabPickerInput(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+func (m Model) handleTabTypePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ws := m.workspaces[m.activeIdx]
+	options := tabTypeOptions()
+
+	switch msg.String() {
+	case "esc":
+		m.modal = modalTabPicker
+		return m, nil
+
+	case "up", "k":
+		if m.tabTypePickerIdx > 0 {
+			m.tabTypePickerIdx--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.tabTypePickerIdx < len(options)-1 {
+			m.tabTypePickerIdx++
+		}
+		return m, nil
+
+	case "enter":
+		m.modal = modalNone
+		tabType := options[m.tabTypePickerIdx]
+		tabName := mux.NextTabName(m.tabPickerTabs, tabType)
+		cmd := mux.NewTabCmd(m.tabPickerSession, ws.Path, tabName, tabType)
+		return m, runExternalCmd(cmd)
+
+	case "1", "2", "3", "4":
+		idx := int(msg.String()[0] - '1')
+		if idx < len(options) {
+			m.tabTypePickerIdx = idx
+			return m.handleTabTypePickerInput(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -533,6 +717,10 @@ func (m Model) renderWithModal(background string) string {
 		modal = m.renderNewWorktreeModal()
 	case modalDeleteWorktree:
 		modal = m.renderDeleteWorktreeModal()
+	case modalTabPicker:
+		modal = m.renderTabPickerModal()
+	case modalTabTypePicker:
+		modal = m.renderTabTypePickerModal()
 	}
 
 	lines := strings.Split(background, "\n")
@@ -608,6 +796,58 @@ func (m Model) renderDeleteWorktreeModal() string {
 		content.WriteString(modalHintStyle.Render("N to toggle • Y to delete"))
 	}
 
+	return modalStyle.Render(content.String())
+}
+
+func (m Model) renderTabPickerModal() string {
+	var content strings.Builder
+
+	title := "Tabs"
+	if m.tabPickerFilter != "" {
+		title = fmt.Sprintf("%s Tabs", tabTypeLabel(m.tabPickerFilter))
+	}
+
+	content.WriteString(modalTitleStyle.Render(title))
+	content.WriteString("\n\n")
+
+	items := append([]string{}, m.tabPickerTabs...)
+	items = append(items, m.tabPickerNewLabel())
+
+	for i, item := range items {
+		prefix := "  "
+		if i == m.tabPickerIdx {
+			prefix = "> "
+			content.WriteString(modalItemSelectedStyle.Render(prefix + item))
+		} else {
+			content.WriteString(modalItemStyle.Render(prefix + item))
+		}
+		content.WriteString("\n")
+	}
+
+	content.WriteString(modalHintStyle.Render("Enter to select • Esc to cancel"))
+	return modalStyle.Render(content.String())
+}
+
+func (m Model) renderTabTypePickerModal() string {
+	var content strings.Builder
+
+	content.WriteString(modalTitleStyle.Render("New Tab"))
+	content.WriteString("\n\n")
+
+	options := tabTypeOptions()
+	for i, option := range options {
+		label := tabTypeLabel(option)
+		prefix := "  "
+		if i == m.tabTypePickerIdx {
+			prefix = "> "
+			content.WriteString(modalItemSelectedStyle.Render(prefix + label))
+		} else {
+			content.WriteString(modalItemStyle.Render(prefix + label))
+		}
+		content.WriteString("\n")
+	}
+
+	content.WriteString(modalHintStyle.Render("Enter to create • Esc to go back"))
 	return modalStyle.Render(content.String())
 }
 
@@ -690,7 +930,7 @@ func (m Model) renderMainContent(height int) string {
 		sessionStatus,
 		statusLine,
 		sessionHint,
-		helpTextStyle.Render("g:lazygit  c:claude  x:codex  t:terminal  n:notes  w:worktree  Enter:attach"),
+		helpTextStyle.Render("g:lazygit  c:claude  x:codex  v:nvim  t:term  n:notes  w:worktree  Enter:tabs"),
 	)
 
 	lines := strings.Split(content, "\n")
@@ -699,6 +939,58 @@ func (m Model) renderMainContent(height int) string {
 	}
 
 	return mainContentStyle.Render(strings.Join(lines[:height], "\n"))
+}
+
+func tabTypeOptions() []mux.TabType {
+	return []mux.TabType{
+		mux.TabClaude,
+		mux.TabCodex,
+		mux.TabNeovim,
+		mux.TabTerminal,
+	}
+}
+
+func tabTypeLabel(tabType mux.TabType) string {
+	switch tabType {
+	case mux.TabClaude:
+		return "Claude"
+	case mux.TabCodex:
+		return "Codex"
+	case mux.TabNeovim:
+		return "Nvim"
+	case mux.TabTerminal:
+		return "Term"
+	case mux.TabLazygit:
+		return "Lazygit"
+	default:
+		return string(tabType)
+	}
+}
+
+func filterManagedTabs(tabs []string) []string {
+	var filtered []string
+	for _, tab := range tabs {
+		if isManagedTabName(tab) {
+			filtered = append(filtered, tab)
+		}
+	}
+	return filtered
+}
+
+func isManagedTabName(name string) bool {
+	prefixes := []string{
+		string(mux.TabLazygit),
+		string(mux.TabClaude),
+		string(mux.TabCodex),
+		string(mux.TabNeovim),
+		string(mux.TabTerminal),
+	}
+	for _, prefix := range prefixes {
+		if name == prefix || strings.HasPrefix(name, prefix+"-") {
+			return true
+		}
+	}
+	return false
 }
 
 func statusText(ws workspace.Workspace) string {
@@ -716,11 +1008,13 @@ func (m Model) renderFooter() string {
 		{"g", "lazygit"},
 		{"c", "claude"},
 		{"x", "codex"},
+		{"v", "nvim"},
 		{"t", "term"},
 		{"n", "notes"},
 		{"w", "new wt"},
 		{"d", "del wt"},
 		{"k", "kill ses"},
+		{"enter", "tabs"},
 		{"q", "quit"},
 	}
 
