@@ -17,7 +17,7 @@ type Config struct {
 }
 
 // Create creates a new worktree with the given branch name
-func Create(repoPath, branchName string) (string, error) {
+func Create(repoPath, branchName, baseBranch string) (string, error) {
 	projectName := filepath.Base(repoPath)
 	parentDir := filepath.Dir(repoPath)
 	worktreePath := filepath.Join(parentDir, projectName+"-"+branchName)
@@ -28,7 +28,11 @@ func Create(repoPath, branchName string) (string, error) {
 	}
 
 	// Create the worktree
-	cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath)
+	args := []string{"worktree", "add", "-b", branchName, worktreePath}
+	if baseBranch != "" {
+		args = append(args, baseBranch)
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Dir = repoPath
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -105,7 +109,8 @@ func Delete(repoPath, worktreePath, branchName string, deleteNotes bool) error {
 	// Delete notes file if requested
 	if deleteNotes {
 		parentDir := filepath.Dir(repoPath)
-		notesPath := filepath.Join(parentDir, branchName+".md")
+		projectName := filepath.Base(repoPath)
+		notesPath := filepath.Join(parentDir, projectName+"-"+branchName+".md")
 		os.Remove(notesPath) // Ignore error if doesn't exist
 	}
 

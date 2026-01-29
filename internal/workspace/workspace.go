@@ -10,13 +10,17 @@ import (
 
 // Workspace represents the main repo or a worktree
 type Workspace struct {
-	Name       string
-	Path       string
-	Branch     string
-	IsWorktree bool
-	IsDirty    bool
-	Ahead      int
-	Behind     int
+	Name          string
+	Path          string
+	Branch        string
+	IsWorktree    bool
+	IsDirty       bool
+	Ahead         int
+	Behind        int
+	StashCount    int
+	RecentCommits []string
+	NotesExists   bool
+	NotesPreview  []string
 }
 
 // Detect finds the main repo and all worktrees from the current directory
@@ -44,6 +48,7 @@ func Detect() ([]Workspace, error) {
 		if err != nil {
 			return nil, err
 		}
+		ws = UpdateGitStatus(ws)
 		return []Workspace{ws}, nil
 	}
 
@@ -53,6 +58,7 @@ func Detect() ([]Workspace, error) {
 		if err != nil {
 			continue
 		}
+		ws = UpdateGitStatus(ws)
 		workspaces = append(workspaces, ws)
 	}
 

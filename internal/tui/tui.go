@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -25,6 +28,8 @@ const (
 	modalTabPicker
 	modalTabTypePicker
 )
+
+const gitPollInterval = 5 * time.Second
 
 // Styles
 var (
@@ -182,7 +187,6 @@ var keys = keyMap{
 	),
 }
 
-
 type Model struct {
 	projectName   string
 	projectPath   string
@@ -193,11 +197,14 @@ type Model struct {
 	err           error
 	ready         bool
 	statusMessage string
+	gitPollActive bool
 
 	// Modal state
-	modal      modalType
-	textInput  textinput.Model
-	modalError string
+	modal           modalType
+	branchInput     textinput.Model
+	baseBranchInput textinput.Model
+	activeInput     int
+	modalError      string
 
 	// Delete confirmation
 	deleteConfirm bool
@@ -212,16 +219,23 @@ type Model struct {
 }
 
 func initialModel() Model {
-	ti := textinput.New()
-	ti.Placeholder = "feature-name"
-	ti.CharLimit = 50
-	ti.Width = 40
+	branchInput := textinput.New()
+	branchInput.Placeholder = "feature-name"
+	branchInput.CharLimit = 50
+	branchInput.Width = 40
+
+	baseBranchInput := textinput.New()
+	baseBranchInput.Placeholder = "base-branch"
+	baseBranchInput.CharLimit = 50
+	baseBranchInput.Width = 40
 
 	return Model{
-		projectName: "loading...",
-		workspaces:  []workspace.Workspace{},
-		activeIdx:   0,
-		textInput:   ti,
+		projectName:     "loading...",
+		workspaces:      []workspace.Workspace{},
+		activeIdx:       0,
+		branchInput:     branchInput,
+		baseBranchInput: baseBranchInput,
+		activeInput:     0,
 	}
 }
 
@@ -235,6 +249,13 @@ type workspacesLoadedMsg struct {
 
 type externalCmdFinishedMsg struct {
 	err error
+}
+
+type gitStatusTickMsg struct{}
+
+type gitStatusMsg struct {
+	workspaces []workspace.Workspace
+	err        error
 }
 
 type worktreeCreatedMsg struct {
@@ -258,9 +279,9 @@ func loadWorkspaces() tea.Msg {
 	}
 }
 
-func createWorktree(repoPath, branchName string) tea.Cmd {
+func createWorktree(repoPath, branchName, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
-		wtPath, err := worktree.Create(repoPath, branchName)
+		wtPath, err := worktree.Create(repoPath, branchName, baseBranch)
 		if err != nil {
 			return worktreeCreatedMsg{err: err}
 		}
@@ -273,9 +294,12 @@ func createWorktree(repoPath, branchName string) tea.Cmd {
 	}
 }
 
-func deleteWorktree(repoPath, wtPath, branchName string, deleteNotes bool) tea.Cmd {
+func deleteWorktree(repoPath, wtPath, branchName, sessionName string, deleteNotes bool) tea.Cmd {
 	return func() tea.Msg {
 		err := worktree.Delete(repoPath, wtPath, branchName, deleteNotes)
+		if err == nil && sessionName != "" && mux.SessionExists(sessionName) {
+			_ = mux.DeleteSession(sessionName)
+		}
 		return worktreeDeletedMsg{err: err}
 	}
 }
@@ -284,6 +308,28 @@ func runExternalCmd(cmd *exec.Cmd) tea.Cmd {
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return externalCmdFinishedMsg{err}
 	})
+}
+
+func scheduleGitStatusTick() tea.Cmd {
+	return tea.Tick(gitPollInterval, func(time.Time) tea.Msg {
+		return gitStatusTickMsg{}
+	})
+}
+
+func refreshGitStatus(workspaces []workspace.Workspace, projectPath, projectName string) tea.Cmd {
+	wsSnapshot := make([]workspace.Workspace, len(workspaces))
+	copy(wsSnapshot, workspaces)
+
+	return func() tea.Msg {
+		for i, ws := range wsSnapshot {
+			updated := workspace.UpdateGitStatus(ws)
+			exists, preview := notesPreview(projectPath, projectName, updated.Branch)
+			updated.NotesExists = exists
+			updated.NotesPreview = preview
+			wsSnapshot[i] = updated
+		}
+		return gitStatusMsg{workspaces: wsSnapshot}
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -305,6 +351,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.workspaces) == 0 && m.err == nil {
 			m.err = fmt.Errorf("not a git repository")
 		}
+		if !m.gitPollActive {
+			m.gitPollActive = true
+			return m, tea.Batch(
+				refreshGitStatus(m.workspaces, m.projectPath, m.projectName),
+				scheduleGitStatusTick(),
+			)
+		}
 
 	case externalCmdFinishedMsg:
 		if msg.err != nil {
@@ -312,9 +365,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, loadWorkspaces
 
+	case gitStatusTickMsg:
+		return m, refreshGitStatus(m.workspaces, m.projectPath, m.projectName)
+
+	case gitStatusMsg:
+		if msg.err == nil {
+			m.workspaces = msg.workspaces
+		}
+		return m, scheduleGitStatusTick()
+
 	case worktreeCreatedMsg:
 		m.modal = modalNone
-		m.textInput.SetValue("")
+		m.branchInput.SetValue("")
+		m.baseBranchInput.SetValue("")
 		if msg.err != nil {
 			m.statusMessage = errorStyle.Render(fmt.Sprintf("Error: %v", msg.err))
 		} else {
@@ -399,8 +462,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Worktree):
 			m.modal = modalNewWorktree
-			m.textInput.SetValue("")
-			m.textInput.Focus()
+			m.branchInput.SetValue("")
+			m.baseBranchInput.SetValue(m.workspaces[m.activeIdx].Branch)
+			m.branchInput.Focus()
+			m.baseBranchInput.Blur()
+			m.activeInput = 0
 			m.modalError = ""
 			return m, textinput.Blink
 
@@ -513,9 +579,7 @@ func (m Model) showTabPicker(filter mux.TabType) (tea.Model, tea.Cmd) {
 
 func (m Model) openNotes() (tea.Model, tea.Cmd) {
 	ws := m.workspaces[m.activeIdx]
-	parentDir := filepath.Dir(m.projectPath)
-	notesFile := fmt.Sprintf("%s-%s.md", m.projectName, ws.Branch)
-	notesPath := filepath.Join(parentDir, notesFile)
+	notesPath := notesPath(m.projectPath, m.projectName, ws.Branch)
 
 	// Open notes in nvim directly (without tmux for simplicity)
 	cmd := exec.Command("nvim", notesPath)
@@ -531,7 +595,7 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.modal = modalNone
 			return m, nil
 		case "enter":
-			branchName := strings.TrimSpace(m.textInput.Value())
+			branchName := strings.TrimSpace(m.branchInput.Value())
 			if branchName == "" {
 				m.modalError = "Branch name cannot be empty"
 				return m, nil
@@ -541,10 +605,29 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.modalError = ""
-			return m, createWorktree(m.projectPath, branchName)
+			baseBranch := strings.TrimSpace(m.baseBranchInput.Value())
+			if baseBranch == "" {
+				baseBranch = m.workspaces[m.activeIdx].Branch
+			}
+			return m, createWorktree(m.projectPath, branchName, baseBranch)
+		case "tab", "shift+tab":
+			if m.activeInput == 0 {
+				m.activeInput = 1
+				m.branchInput.Blur()
+				m.baseBranchInput.Focus()
+			} else {
+				m.activeInput = 0
+				m.baseBranchInput.Blur()
+				m.branchInput.Focus()
+			}
+			return m, nil
 		default:
 			var cmd tea.Cmd
-			m.textInput, cmd = m.textInput.Update(msg)
+			if m.activeInput == 0 {
+				m.branchInput, cmd = m.branchInput.Update(msg)
+			} else {
+				m.baseBranchInput, cmd = m.baseBranchInput.Update(msg)
+			}
 			return m, cmd
 		}
 
@@ -559,7 +642,8 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			ws := m.workspaces[m.activeIdx]
-			return m, deleteWorktree(m.projectPath, ws.Path, ws.Branch, m.deleteNotes)
+			sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
+			return m, deleteWorktree(m.projectPath, ws.Path, ws.Branch, sessionName, m.deleteNotes)
 		case "n", "N":
 			if m.deleteConfirm {
 				m.deleteNotes = !m.deleteNotes
@@ -754,7 +838,10 @@ func (m Model) renderNewWorktreeModal() string {
 	content.WriteString(modalTitleStyle.Render("New Worktree"))
 	content.WriteString("\n\n")
 	content.WriteString("Branch name:\n")
-	content.WriteString(m.textInput.View())
+	content.WriteString(m.branchInput.View())
+	content.WriteString("\n\n")
+	content.WriteString("Base branch:\n")
+	content.WriteString(m.baseBranchInput.View())
 
 	if m.modalError != "" {
 		content.WriteString("\n")
@@ -762,7 +849,7 @@ func (m Model) renderNewWorktreeModal() string {
 	}
 
 	content.WriteString("\n")
-	content.WriteString(modalHintStyle.Render("Enter to create • Esc to cancel"))
+	content.WriteString(modalHintStyle.Render("Tab to switch • Enter to create • Esc to cancel"))
 
 	return modalStyle.Render(content.String())
 }
@@ -783,8 +870,7 @@ func (m Model) renderDeleteWorktreeModal() string {
 		content.WriteString(modalHintStyle.Render("Y to confirm • N to cancel"))
 	} else {
 		content.WriteString("Also delete notes file?\n\n")
-		notesFile := fmt.Sprintf("%s-%s.md", m.projectName, ws.Branch)
-		notesPath := filepath.Join(filepath.Dir(m.projectPath), notesFile)
+		notesPath := notesPath(m.projectPath, m.projectName, ws.Branch)
 		content.WriteString(fmt.Sprintf("  %s\n", notesPath))
 		content.WriteString("\n")
 		deleteNotesStr := "No"
@@ -860,6 +946,9 @@ func (m Model) renderTopBar() string {
 		if ws.IsDirty {
 			name += dirtyIndicator.String()
 		}
+		if ws.Ahead > 0 || ws.Behind > 0 {
+			name += fmt.Sprintf(" ↑%d↓%d", ws.Ahead, ws.Behind)
+		}
 
 		// Show tmux session indicator
 		sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
@@ -915,25 +1004,43 @@ func (m Model) renderMainContent(height int) string {
 		sessionHint = helpTextStyle.Render("\n\nTip: In tmux, press Ctrl+b then d to detach (keeps session alive)")
 	}
 
-	content := fmt.Sprintf(
-		"Workspace: %s (%s)\n"+
-			"Path: %s\n"+
-			"Branch: %s\n"+
-			"Git: %s\n"+
-			"Session: %s%s%s\n\n"+
-			"%s",
-		ws.Name,
-		wtType,
-		ws.Path,
-		ws.Branch,
-		statusText(ws),
-		sessionStatus,
-		statusLine,
-		sessionHint,
-		helpTextStyle.Render("g:lazygit  c:claude  x:codex  v:nvim  t:term  n:notes  w:worktree  Enter:tabs"),
-	)
+	gitStatus := statusText(ws)
+	if ws.Ahead > 0 || ws.Behind > 0 {
+		gitStatus = fmt.Sprintf("%s (↑%d↓%d)", gitStatus, ws.Ahead, ws.Behind)
+	}
 
-	lines := strings.Split(content, "\n")
+	var content strings.Builder
+	content.WriteString(fmt.Sprintf("Workspace: %s (%s)\n", ws.Name, wtType))
+	content.WriteString(fmt.Sprintf("Path: %s\n", ws.Path))
+	content.WriteString(fmt.Sprintf("Branch: %s\n", ws.Branch))
+	content.WriteString(fmt.Sprintf("Git: %s\n", gitStatus))
+	content.WriteString(fmt.Sprintf("Stash: %d\n", ws.StashCount))
+	content.WriteString(fmt.Sprintf("Session: %s%s%s\n\n", sessionStatus, statusLine, sessionHint))
+
+	content.WriteString("Commits:\n")
+	if len(ws.RecentCommits) == 0 {
+		content.WriteString("  (none)\n")
+	} else {
+		for _, line := range ws.RecentCommits {
+			content.WriteString("  " + line + "\n")
+		}
+	}
+
+	if ws.NotesExists {
+		content.WriteString("\nNotes:\n")
+		if len(ws.NotesPreview) == 0 {
+			content.WriteString("  (empty)\n")
+		} else {
+			for _, line := range ws.NotesPreview {
+				content.WriteString("  " + line + "\n")
+			}
+		}
+	}
+
+	content.WriteString("\n")
+	content.WriteString(helpTextStyle.Render("g:lazygit  c:claude  x:codex  v:nvim  t:term  n:notes  w:worktree  Enter:tabs"))
+
+	lines := strings.Split(content.String(), "\n")
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
@@ -991,6 +1098,31 @@ func isManagedTabName(name string) bool {
 		}
 	}
 	return false
+}
+
+func notesPath(projectPath, projectName, branch string) string {
+	parentDir := filepath.Dir(projectPath)
+	notesFile := fmt.Sprintf("%s-%s.md", projectName, branch)
+	return filepath.Join(parentDir, notesFile)
+}
+
+func notesPreview(projectPath, projectName, branch string) (bool, []string) {
+	path := notesPath(projectPath, projectName, branch)
+	file, err := os.Open(path)
+	if err != nil {
+		return false, nil
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+		if len(lines) >= 10 {
+			break
+		}
+	}
+	return true, lines
 }
 
 func statusText(ws workspace.Workspace) string {
