@@ -15,7 +15,7 @@ type Dependency struct {
 
 var dependencies = []Dependency{
 	{Name: "git", Command: "git", Required: true, MinVer: "2.0"},
-	{Name: "zellij", Command: "zellij", Required: true, MinVer: "0.40"},
+	{Name: "tmux", Command: "tmux", Required: true, MinVer: "3.0"},
 	{Name: "neovim", Command: "nvim", Required: true, MinVer: "0.9"},
 	{Name: "lazygit", Command: "lazygit", Required: false, MinVer: "0.40"},
 }
@@ -70,8 +70,8 @@ func getVersion(command string) string {
 	switch command {
 	case "git":
 		cmd = exec.Command("git", "--version")
-	case "zellij":
-		cmd = exec.Command("zellij", "--version")
+	case "tmux":
+		cmd = exec.Command("tmux", "-V")
 	case "nvim":
 		cmd = exec.Command("nvim", "--version")
 	case "lazygit":
@@ -103,8 +103,8 @@ func parseVersion(command, output string) string {
 		if len(parts) >= 3 {
 			return parts[2]
 		}
-	case "zellij":
-		// "zellij 0.41.2"
+	case "tmux":
+		// "tmux 3.4"
 		parts := strings.Fields(line)
 		if len(parts) >= 2 {
 			return parts[1]
@@ -152,12 +152,11 @@ func printStatus(dep Dependency, installed bool, version string) {
 
 func printInstallInstructions() {
 	fmt.Println("Arch Linux:")
-	fmt.Println("  sudo pacman -S git neovim zellij")
+	fmt.Println("  sudo pacman -S git neovim tmux")
 	fmt.Println("  yay -S lazygit  # or paru -S lazygit")
 	fmt.Println()
 	fmt.Println("Ubuntu/Debian:")
-	fmt.Println("  sudo apt install git neovim")
-	fmt.Println("  # zellij: https://zellij.dev/documentation/installation")
+	fmt.Println("  sudo apt install git neovim tmux")
 	fmt.Println("  # lazygit: https://github.com/jesseduffield/lazygit#installation")
 	fmt.Println()
 	fmt.Println("For more info, visit: https://github.com/emilianotisato/vibeit")

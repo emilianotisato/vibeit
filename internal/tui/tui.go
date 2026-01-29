@@ -412,8 +412,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) attachSession() (tea.Model, tea.Cmd) {
-	if !mux.IsZellijInstalled() {
-		m.statusMessage = errorStyle.Render("zellij not installed. Run 'vibeit doctor' for help.")
+	if !mux.IsTmuxInstalled() {
+		m.statusMessage = errorStyle.Render("tmux not installed. Run 'vibeit doctor' for help.")
 		return m, nil
 	}
 
@@ -425,8 +425,8 @@ func (m Model) attachSession() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openSession(tabType mux.TabType) (tea.Model, tea.Cmd) {
-	if !mux.IsZellijInstalled() {
-		m.statusMessage = errorStyle.Render("zellij not installed. Run 'vibeit doctor' for help.")
+	if !mux.IsTmuxInstalled() {
+		m.statusMessage = errorStyle.Render("tmux not installed. Run 'vibeit doctor' for help.")
 		return m, nil
 	}
 
@@ -440,9 +440,10 @@ func (m Model) openSession(tabType mux.TabType) (tea.Model, tea.Cmd) {
 func (m Model) openNotes() (tea.Model, tea.Cmd) {
 	ws := m.workspaces[m.activeIdx]
 	parentDir := filepath.Dir(m.projectPath)
-	notesPath := filepath.Join(parentDir, ws.Branch+".md")
+	notesFile := fmt.Sprintf("%s-%s.md", m.projectName, ws.Branch)
+	notesPath := filepath.Join(parentDir, notesFile)
 
-	// Open notes in nvim directly (without zellij for simplicity)
+	// Open notes in nvim directly (without tmux for simplicity)
 	cmd := exec.Command("nvim", notesPath)
 	cmd.Dir = ws.Path
 	return m, runExternalCmd(cmd)
@@ -594,7 +595,8 @@ func (m Model) renderDeleteWorktreeModal() string {
 		content.WriteString(modalHintStyle.Render("Y to confirm • N to cancel"))
 	} else {
 		content.WriteString("Also delete notes file?\n\n")
-		notesPath := filepath.Join(filepath.Dir(m.projectPath), ws.Branch+".md")
+		notesFile := fmt.Sprintf("%s-%s.md", m.projectName, ws.Branch)
+		notesPath := filepath.Join(filepath.Dir(m.projectPath), notesFile)
 		content.WriteString(fmt.Sprintf("  %s\n", notesPath))
 		content.WriteString("\n")
 		deleteNotesStr := "No"
@@ -619,7 +621,7 @@ func (m Model) renderTopBar() string {
 			name += dirtyIndicator.String()
 		}
 
-		// Show zellij session indicator
+		// Show tmux session indicator
 		sessionName := mux.SessionName(m.projectName, ws.Name)
 		if mux.SessionExists(sessionName) {
 			name += " ●"
@@ -670,7 +672,7 @@ func (m Model) renderMainContent(height int) string {
 
 	sessionHint := ""
 	if sessionStatus == "session active" {
-		sessionHint = helpTextStyle.Render("\n\nTip: In zellij, press Ctrl+o then d to detach (keeps session alive)")
+		sessionHint = helpTextStyle.Render("\n\nTip: In tmux, press Ctrl+b then d to detach (keeps session alive)")
 	}
 
 	content := fmt.Sprintf(

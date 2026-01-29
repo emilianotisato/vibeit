@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// SessionName generates a zellij session name for a workspace
+// SessionName generates a tmux session name for a workspace
 func SessionName(projectName, workspaceName string) string {
 	return fmt.Sprintf("vibeit-%s-%s", sanitize(projectName), sanitize(workspaceName))
 }
@@ -21,21 +21,10 @@ func sanitize(s string) string {
 	return s
 }
 
-// SessionExists checks if a zellij session exists
+// SessionExists checks if a tmux session exists
 func SessionExists(sessionName string) bool {
-	cmd := exec.Command("zellij", "list-sessions")
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	for _, line := range strings.Split(string(output), "\n") {
-		name := strings.Split(strings.TrimSpace(line), " ")[0]
-		if name == sessionName {
-			return true
-		}
-	}
-	return false
+	cmd := exec.Command("tmux", "has-session", "-t", sessionName)
+	return cmd.Run() == nil
 }
 
 // TabType represents the type of tab to create
@@ -65,7 +54,11 @@ func TabCommand(tabType TabType) string {
 
 // AttachOrCreateCmd returns a command that attaches to session, creating if needed
 func AttachOrCreateCmd(sessionName, workDir string) *exec.Cmd {
-	cmd := exec.Command("zellij", "attach", "--create", sessionName)
+	script := fmt.Sprintf(
+		`tmux has-session -t %q 2>/dev/null && tmux attach -t %q || tmux new-session -s %q -c %q`,
+		sessionName, sessionName, sessionName, workDir,
+	)
+	cmd := exec.Command("sh", "-c", script)
 	cmd.Dir = workDir
 	return cmd
 }
@@ -73,48 +66,48 @@ func AttachOrCreateCmd(sessionName, workDir string) *exec.Cmd {
 // OpenWithCommand creates/attaches to session with a specific command running
 func OpenWithCommand(sessionName, workDir string, tabType TabType) *exec.Cmd {
 	command := TabCommand(tabType)
-	tabName := string(tabType)
-
-	if command != "" {
-		// Create layout file
-		layoutContent := fmt.Sprintf("session_name \"%s\"\nlayout {\n    tab name=\"%s\" {\n        pane command=\"%s\"\n    }\n}\n", sessionName, tabName, command)
-		tmpFile, err := os.CreateTemp("", "vibeit-layout-*.kdl")
-		if err == nil {
-			tmpFile.WriteString(layoutContent)
-			tmpFile.Close()
-
-			// Delete any existing session (active or dead), then create fresh
-			script := fmt.Sprintf(
-				`zellij delete-session --force "%s" 2>/dev/null; zellij --layout "%s"`,
-				sessionName, tmpFile.Name(),
-			)
-			cmd := exec.Command("sh", "-c", script)
-			cmd.Dir = workDir
-			return cmd
-		}
+	if command == "" {
+		return AttachOrCreateCmd(sessionName, workDir)
 	}
 
-	// No command or temp file failed - just attach/create session
-	cmd := exec.Command("zellij", "attach", "--create", sessionName)
+	tabName := string(tabType)
+	windowTarget := fmt.Sprintf("%s:%s", sessionName, tabName)
+	script := fmt.Sprintf(
+		`if tmux has-session -t %q 2>/dev/null; then `+
+			`tmux new-window -t %q -n %q -c %q %q 2>/dev/null; `+
+			`tmux select-window -t %q 2>/dev/null; `+
+			`tmux attach -t %q; `+
+			`else `+
+			`tmux new-session -d -s %q -n %q -c %q %q; `+
+			`tmux attach -t %q; `+
+			`fi`,
+		sessionName,
+		sessionName, tabName, workDir, command,
+		windowTarget,
+		sessionName,
+		sessionName, tabName, workDir, command,
+		sessionName,
+	)
+	cmd := exec.Command("sh", "-c", script)
 	cmd.Dir = workDir
 	return cmd
 }
 
-// DeleteSession deletes a zellij session (works for both active and dead)
+// DeleteSession deletes a tmux session
 func DeleteSession(sessionName string) error {
-	cmd := exec.Command("zellij", "delete-session", "--force", sessionName)
+	cmd := exec.Command("tmux", "kill-session", "-t", sessionName)
 	return cmd.Run()
 }
 
-// KillSession kills a zellij session
+// KillSession kills a tmux session
 func KillSession(sessionName string) error {
-	cmd := exec.Command("zellij", "kill-session", sessionName)
+	cmd := exec.Command("tmux", "kill-session", "-t", sessionName)
 	return cmd.Run()
 }
 
-// IsZellijInstalled checks if zellij is available
-func IsZellijInstalled() bool {
-	_, err := exec.LookPath("zellij")
+// IsTmuxInstalled checks if tmux is available
+func IsTmuxInstalled() bool {
+	_, err := exec.LookPath("tmux")
 	return err == nil
 }
 
