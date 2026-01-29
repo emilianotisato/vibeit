@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -112,6 +113,7 @@ type Model struct {
 	commandMode    bool
 	err            error
 	ready          bool
+	statusMessage  string
 }
 
 func initialModel() Model {
@@ -157,7 +159,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("not a git repository")
 		}
 
+	case lazygitFinishedMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("lazygit error: %v", msg.err)
+		}
+		// Reload workspace status after lazygit (might have committed)
+		return m, loadWorkspaces
+
 	case tea.KeyMsg:
+		// Clear status message on any key
+		m.statusMessage = ""
+
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -171,6 +183,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.workspaces) > 0 {
 				m.activeIdx = (m.activeIdx - 1 + len(m.workspaces)) % len(m.workspaces)
 			}
+
+		case key.Matches(msg, keys.Git):
+			if len(m.workspaces) > 0 {
+				ws := m.workspaces[m.activeIdx]
+				return m, runLazygit(ws.Path)
+			}
+
+		case key.Matches(msg, keys.NewTerm):
+			m.statusMessage = "Terminal: requires zellij (coming in Phase 3)"
+
+		case key.Matches(msg, keys.Notes):
+			m.statusMessage = "Notes: coming in Phase 5"
+
+		case key.Matches(msg, keys.Worktree):
+			m.statusMessage = "New worktree: coming in Phase 2"
 
 		case msg.String() >= "1" && msg.String() <= "9":
 			idx := int(msg.String()[0] - '1')
@@ -244,6 +271,10 @@ func (m Model) renderTopBar() string {
 	return topBarStyle.Width(m.width).Render(content + strings.Repeat(" ", padding))
 }
 
+var statusMsgStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("214")).
+	Bold(true)
+
 func (m Model) renderMainContent(height int) string {
 	if len(m.workspaces) == 0 {
 		return mainContentStyle.Height(height).Render("No workspaces found")
@@ -251,16 +282,22 @@ func (m Model) renderMainContent(height int) string {
 
 	ws := m.workspaces[m.activeIdx]
 
+	statusLine := ""
+	if m.statusMessage != "" {
+		statusLine = "\n" + statusMsgStyle.Render(m.statusMessage)
+	}
+
 	content := fmt.Sprintf(
 		"Workspace: %s\n"+
 			"Path: %s\n"+
 			"Branch: %s\n"+
-			"Status: %s\n\n"+
+			"Status: %s%s\n\n"+
 			"%s",
 		ws.Name,
 		ws.Path,
 		ws.Branch,
 		statusText(ws),
+		statusLine,
 		helpTextStyle.Render("Press 't' for terminal, 'g' for lazygit, 'n' for notes, 'w' for new worktree"),
 	)
 
@@ -308,6 +345,18 @@ func (m Model) renderFooter() string {
 	}
 
 	return footerStyle.Width(m.width).Render(content + strings.Repeat(" ", padding))
+}
+
+func runLazygit(path string) tea.Cmd {
+	c := exec.Command("lazygit")
+	c.Dir = path
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return lazygitFinishedMsg{err}
+	})
+}
+
+type lazygitFinishedMsg struct {
+	err error
 }
 
 func Run() error {
