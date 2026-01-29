@@ -206,6 +206,10 @@ type Model struct {
 	activeInput     int
 	modalError      string
 
+	baseBranchOptions  []string
+	baseBranchFiltered []string
+	baseBranchIdx      int
+
 	// Delete confirmation
 	deleteConfirm bool
 	deleteNotes   bool
@@ -464,7 +468,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Worktree):
 			m.modal = modalNewWorktree
 			m.branchInput.SetValue("")
-			m.baseBranchInput.SetValue(m.workspaces[m.activeIdx].Branch)
+			branches, err := workspace.ListBranches(m.workspaces[m.activeIdx].Path)
+			if err != nil {
+				branches = nil
+			}
+			m.baseBranchOptions = branches
+			m.baseBranchFiltered = nil
+			m.baseBranchIdx = 0
+			currentBranch := m.workspaces[m.activeIdx].Branch
+			m.baseBranchInput.SetValue("")
+			m.updateBaseBranchFilter()
+			m.baseBranchIdx = indexOfBranch(m.baseBranchFiltered, currentBranch)
 			m.branchInput.Focus()
 			m.baseBranchInput.Blur()
 			m.activeInput = 0
@@ -607,10 +621,23 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.modalError = ""
 			baseBranch := strings.TrimSpace(m.baseBranchInput.Value())
+			if len(m.baseBranchFiltered) > 0 && m.baseBranchIdx < len(m.baseBranchFiltered) {
+				baseBranch = m.baseBranchFiltered[m.baseBranchIdx]
+			}
 			if baseBranch == "" {
 				baseBranch = m.workspaces[m.activeIdx].Branch
 			}
 			return m, createWorktree(m.projectPath, branchName, baseBranch)
+		case "up", "k":
+			if m.activeInput == 1 && m.baseBranchIdx > 0 {
+				m.baseBranchIdx--
+				return m, nil
+			}
+		case "down", "j":
+			if m.activeInput == 1 && m.baseBranchIdx < len(m.baseBranchFiltered)-1 {
+				m.baseBranchIdx++
+				return m, nil
+			}
 		case "tab", "shift+tab":
 			if m.activeInput == 0 {
 				m.activeInput = 1
@@ -628,6 +655,7 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.branchInput, cmd = m.branchInput.Update(msg)
 			} else {
 				m.baseBranchInput, cmd = m.baseBranchInput.Update(msg)
+				m.updateBaseBranchFilter()
 			}
 			return m, cmd
 		}
@@ -843,6 +871,8 @@ func (m Model) renderNewWorktreeModal() string {
 	content.WriteString("\n\n")
 	content.WriteString("Base branch:\n")
 	content.WriteString(m.baseBranchInput.View())
+	content.WriteString("\n")
+	content.WriteString(m.renderBaseBranchOptions())
 
 	if m.modalError != "" {
 		content.WriteString("\n")
@@ -850,9 +880,63 @@ func (m Model) renderNewWorktreeModal() string {
 	}
 
 	content.WriteString("\n")
-	content.WriteString(modalHintStyle.Render("Tab to switch • Enter to create • Esc to cancel"))
+	content.WriteString(modalHintStyle.Render("Tab to switch • ↑↓ to pick base • Enter to create • Esc to cancel"))
 
 	return modalStyle.Render(content.String())
+}
+
+func (m Model) renderBaseBranchOptions() string {
+	if len(m.baseBranchOptions) == 0 {
+		return helpTextStyle.Render("  (no branches found)")
+	}
+	if len(m.baseBranchFiltered) == 0 {
+		return helpTextStyle.Render("  (no matches)")
+	}
+
+	total := len(m.baseBranchFiltered)
+	maxItems := 6
+	if total < maxItems {
+		maxItems = total
+	}
+
+	start := 0
+	if m.baseBranchIdx >= maxItems {
+		start = m.baseBranchIdx - maxItems + 1
+	}
+	end := start + maxItems
+	if end > total {
+		end = total
+		start = end - maxItems
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	var content strings.Builder
+	if start > 0 {
+		content.WriteString(helpTextStyle.Render(fmt.Sprintf("  ...%d above", start)))
+		content.WriteString("\n")
+	}
+	for i := start; i < end; i++ {
+		prefix := "  "
+		if i == m.baseBranchIdx {
+			prefix = "> "
+			content.WriteString(modalItemSelectedStyle.Render(prefix + m.baseBranchFiltered[i]))
+		} else {
+			content.WriteString(modalItemStyle.Render(prefix + m.baseBranchFiltered[i]))
+		}
+		if i < end-1 {
+			content.WriteString("\n")
+		}
+	}
+
+	if end < total {
+		remaining := total - end
+		content.WriteString("\n")
+		content.WriteString(helpTextStyle.Render(fmt.Sprintf("  ...%d more", remaining)))
+	}
+
+	return content.String()
 }
 
 func (m Model) renderDeleteWorktreeModal() string {
@@ -1074,6 +1158,49 @@ func tabTypeLabel(tabType mux.TabType) string {
 	default:
 		return string(tabType)
 	}
+}
+
+func (m *Model) updateBaseBranchFilter() {
+	query := strings.TrimSpace(m.baseBranchInput.Value())
+	m.baseBranchFiltered = filterBranches(m.baseBranchOptions, query)
+	m.baseBranchIdx = 0
+	if query == "" {
+		return
+	}
+	for i, branch := range m.baseBranchFiltered {
+		if branch == query {
+			m.baseBranchIdx = i
+			return
+		}
+	}
+}
+
+func filterBranches(branches []string, query string) []string {
+	if len(branches) == 0 {
+		return nil
+	}
+	if query == "" {
+		filtered := make([]string, len(branches))
+		copy(filtered, branches)
+		return filtered
+	}
+	query = strings.ToLower(query)
+	var filtered []string
+	for _, branch := range branches {
+		if strings.Contains(strings.ToLower(branch), query) {
+			filtered = append(filtered, branch)
+		}
+	}
+	return filtered
+}
+
+func indexOfBranch(branches []string, target string) int {
+	for i, branch := range branches {
+		if branch == target {
+			return i
+		}
+	}
+	return 0
 }
 
 func filterManagedTabs(tabs []string) []string {

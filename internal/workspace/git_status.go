@@ -89,6 +89,30 @@ func gitRecentCommits(path string, limit int) ([]string, bool) {
 	return commits, true
 }
 
+// ListBranches returns local and remote branches for a repo path.
+func ListBranches(path string) ([]string, error) {
+	out, err := runGitCommand(path, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes")
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{})
+	var branches []string
+	for _, line := range strings.Split(out, "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || strings.HasSuffix(name, "/HEAD") {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		branches = append(branches, name)
+	}
+
+	return branches, nil
+}
+
 func runGitCommand(path string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", path}, args...)...)
 	out, err := cmd.Output()
