@@ -81,6 +81,38 @@ var (
 			Foreground(lipgloss.Color("214")).
 			Bold(true)
 
+	sectionTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("244")).
+				Bold(true)
+
+	labelStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244"))
+
+	valueStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252"))
+
+	mutedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
+
+	pillStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("238")).
+			Bold(true).
+			Padding(0, 1)
+
+	pillGoodStyle = pillStyle.Copy().
+			Background(lipgloss.Color("22"))
+
+	pillWarnStyle = pillStyle.Copy().
+			Background(lipgloss.Color("160"))
+
+	pillInfoStyle = pillStyle.Copy().
+			Background(lipgloss.Color("62"))
+
+	commitHashStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("81")).
+			Bold(true)
+
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("62")).
@@ -833,6 +865,7 @@ func (m Model) View() string {
 	contentHeight := m.height - 4
 	b.WriteString(m.renderMainContent(contentHeight))
 
+	b.WriteString("\n")
 	b.WriteString(m.renderFooter())
 
 	if m.modal != modalNone {
@@ -1088,70 +1121,236 @@ func (m Model) renderMainContent(height int) string {
 
 	ws := m.workspaces[m.activeIdx]
 
-	statusLine := ""
-	if m.statusMessage != "" {
-		statusLine = "\n" + m.statusMessage
+	innerWidth := m.width - 4
+	contentWidth := innerWidth
+	if contentWidth < 20 {
+		contentWidth = 20
 	}
 
+	var content string
+	if innerWidth < 70 {
+		left := m.renderWorkspacePanel(ws, contentWidth)
+		right := m.renderGitPanel(ws, contentWidth)
+		content = left + "\n\n" + right
+	} else {
+		gap := mutedStyle.Render(" | ")
+		colWidth := (contentWidth - lipgloss.Width(gap)) / 2
+		if colWidth < 20 {
+			colWidth = 20
+		}
+		left := m.renderWorkspacePanel(ws, colWidth)
+		right := m.renderGitPanel(ws, colWidth)
+		leftCol := lipgloss.NewStyle().Width(colWidth).Render(left)
+		rightCol := lipgloss.NewStyle().Width(colWidth).Render(right)
+		content = lipgloss.JoinHorizontal(lipgloss.Top, leftCol, gap, rightCol)
+	}
+
+	lines := strings.Split(content, "\n")
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+
+	return mainContentStyle.Render(strings.Join(lines[:height], "\n"))
+}
+
+func (m Model) renderWorkspacePanel(ws workspace.Workspace, width int) string {
+	labelWidth := 8
 	wtType := "main repo"
 	if ws.IsWorktree {
 		wtType = "worktree"
 	}
 
 	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
-	sessionStatus := "no session"
-	if mux.SessionExists(sessionName) {
-		sessionStatus = "session active"
-	}
-
-	sessionHint := ""
-	if sessionStatus == "session active" {
-		sessionHint = helpTextStyle.Render("\n\nTip: In tmux, press Ctrl+\\ to detach (keeps session alive)")
-	}
-
-	gitStatus := statusText(ws)
-	if ws.Ahead > 0 || ws.Behind > 0 {
-		gitStatus = fmt.Sprintf("%s (↑%d↓%d)", gitStatus, ws.Ahead, ws.Behind)
+	sessionActive := mux.SessionExists(sessionName)
+	sessionValue := mutedStyle.Render("NONE")
+	if sessionActive {
+		sessionValue = pillInfoStyle.Render("ACTIVE")
 	}
 
 	var content strings.Builder
-	content.WriteString(fmt.Sprintf("Workspace: %s (%s)\n", ws.Name, wtType))
-	content.WriteString(fmt.Sprintf("Path: %s\n", ws.Path))
-	content.WriteString(fmt.Sprintf("Branch: %s\n", ws.Branch))
-	content.WriteString(fmt.Sprintf("Git: %s\n", gitStatus))
-	content.WriteString(fmt.Sprintf("Stash: %d\n", ws.StashCount))
-	content.WriteString(fmt.Sprintf("Session: %s%s%s\n\n", sessionStatus, statusLine, sessionHint))
-
-	content.WriteString("Commits:\n")
-	if len(ws.RecentCommits) == 0 {
-		content.WriteString("  (none)\n")
-	} else {
-		for _, line := range ws.RecentCommits {
-			content.WriteString("  " + line + "\n")
-		}
-	}
-
-	content.WriteString("\nNotes:\n")
-	if !ws.NotesExists {
-		content.WriteString("  (no notes yet)\n")
-		content.WriteString("  Press n to create\n")
-	} else if len(ws.NotesPreview) == 0 {
-		content.WriteString("  (empty)\n")
-	} else {
-		for _, line := range ws.NotesPreview {
-			content.WriteString("  " + line + "\n")
-		}
-	}
-
+	content.WriteString(sectionTitleStyle.Render("WORKSPACE"))
 	content.WriteString("\n")
-	content.WriteString(helpTextStyle.Render("g:lazygit  c:claude  x:codex  v:nvim  t:term  n:notes  w:worktree  Enter:tabs"))
+	content.WriteString(formatLabelValue("Name", ws.Name, labelWidth, width))
+	content.WriteString("\n")
+	content.WriteString(formatLabelValue("Type", wtType, labelWidth, width))
+	content.WriteString("\n")
+	content.WriteString(formatLabelValue("Branch", ws.Branch, labelWidth, width))
+	content.WriteString("\n")
+	content.WriteString(formatLabelValue("Path", truncateMiddle(ws.Path, width-labelWidth-1), labelWidth, width))
+	content.WriteString("\n")
+	content.WriteString(formatLabelLine("Session", sessionValue, labelWidth))
 
-	lines := strings.Split(content.String(), "\n")
-	for len(lines) < height {
-		lines = append(lines, "")
+	if sessionActive {
+		content.WriteString("\n")
+		content.WriteString(helpTextStyle.Render("Detach: Ctrl+\\"))
 	}
 
-	return mainContentStyle.Render(strings.Join(lines[:height], "\n"))
+	if msg := styleStatusMessage(m.statusMessage); msg != "" {
+		content.WriteString("\n")
+		content.WriteString(msg)
+	}
+
+	content.WriteString("\n\n")
+	content.WriteString(sectionTitleStyle.Render("NOTES"))
+	content.WriteString("\n")
+	content.WriteString(renderNotes(ws.NotesPreview, ws.NotesExists, width))
+
+	return content.String()
+}
+
+func (m Model) renderGitPanel(ws workspace.Workspace, width int) string {
+	labelWidth := 8
+	statusValue := pillGoodStyle.Render("CLEAN")
+	if ws.IsDirty {
+		statusValue = pillWarnStyle.Render("DIRTY")
+	}
+
+	syncValue := pillInfoStyle.Render("SYNC")
+	if ws.Ahead > 0 || ws.Behind > 0 {
+		parts := []string{}
+		if ws.Ahead > 0 {
+			parts = append(parts, pillInfoStyle.Render(fmt.Sprintf("AHEAD %d", ws.Ahead)))
+		}
+		if ws.Behind > 0 {
+			parts = append(parts, pillInfoStyle.Render(fmt.Sprintf("BEHIND %d", ws.Behind)))
+		}
+		syncValue = strings.Join(parts, " ")
+	}
+
+	stashValue := mutedStyle.Render("0")
+	if ws.StashCount > 0 {
+		stashValue = pillInfoStyle.Render(fmt.Sprintf("STASH %d", ws.StashCount))
+	}
+
+	var content strings.Builder
+	content.WriteString(sectionTitleStyle.Render("GIT"))
+	content.WriteString("\n")
+	content.WriteString(formatLabelLine("Status", statusValue, labelWidth))
+	content.WriteString("\n")
+	content.WriteString(formatLabelLine("Sync", syncValue, labelWidth))
+	content.WriteString("\n")
+	content.WriteString(formatLabelLine("Stash", stashValue, labelWidth))
+	content.WriteString("\n\n")
+	content.WriteString(sectionTitleStyle.Render("COMMITS"))
+	content.WriteString("\n")
+	content.WriteString(renderCommits(ws.RecentCommits, width))
+
+	return content.String()
+}
+
+func formatLabelValue(label, value string, labelWidth, width int) string {
+	labelText := fmt.Sprintf("%-*s", labelWidth, label+":")
+	valueMax := width - labelWidth - 1
+	if valueMax < 0 {
+		valueMax = 0
+	}
+	return labelStyle.Render(labelText) + " " + valueStyle.Render(truncateText(value, valueMax))
+}
+
+func formatLabelLine(label, value string, labelWidth int) string {
+	labelText := fmt.Sprintf("%-*s", labelWidth, label+":")
+	return labelStyle.Render(labelText) + " " + value
+}
+
+func renderNotes(lines []string, exists bool, width int) string {
+	if !exists {
+		return mutedStyle.Render("  (no notes yet)") + "\n" + helpTextStyle.Render("  Press n to create")
+	}
+	if len(lines) == 0 {
+		return mutedStyle.Render("  (empty)")
+	}
+
+	var content strings.Builder
+	for i, line := range lines {
+		prefix := fmt.Sprintf("%2d ", i+1)
+		available := width - len(prefix)
+		if available < 0 {
+			available = 0
+		}
+		content.WriteString(mutedStyle.Render(prefix))
+		content.WriteString(truncateText(line, available))
+		if i < len(lines)-1 {
+			content.WriteString("\n")
+		}
+	}
+	return content.String()
+}
+
+func renderCommits(commits []string, width int) string {
+	if len(commits) == 0 {
+		return mutedStyle.Render("  (none)")
+	}
+
+	var content strings.Builder
+	for i, line := range commits {
+		hash, msg := splitCommitLine(line)
+		prefix := mutedStyle.Render("- ")
+		available := width - 2 - len(hash) - 1
+		if available < 0 {
+			available = 0
+		}
+		content.WriteString(prefix)
+		content.WriteString(commitHashStyle.Render(hash))
+		if msg != "" {
+			content.WriteString(" ")
+			content.WriteString(mutedStyle.Render(truncateText(msg, available)))
+		}
+		if i < len(commits)-1 {
+			content.WriteString("\n")
+		}
+	}
+	return content.String()
+}
+
+func splitCommitLine(line string) (string, string) {
+	parts := strings.SplitN(strings.TrimSpace(line), " ", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		return line, ""
+	}
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return parts[0], parts[1]
+}
+
+func truncateText(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	return string(runes[:max-3]) + "..."
+}
+
+func truncateMiddle(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	head := (max - 3) / 2
+	tail := max - 3 - head
+	return string(runes[:head]) + "..." + string(runes[len(runes)-tail:])
+}
+
+func styleStatusMessage(message string) string {
+	if message == "" {
+		return ""
+	}
+	if strings.Contains(message, "\x1b[") {
+		return message
+	}
+	return statusMsgStyle.Render(message)
 }
 
 func tabTypeOptions() []mux.TabType {
