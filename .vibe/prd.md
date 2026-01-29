@@ -1,7 +1,7 @@
 # vibeit
 
 **Type**: Feature (New Application)
-**Status**: Draft
+**Status**: Approved
 **Created**: 2026-01-28
 **Author**: Emiliano
 
@@ -156,6 +156,15 @@ Uses nvim or neovim-remote to open in existing instance or spawn new one.
 **Priority**: Nice to Have
 **Description**: Remember open tabs per workspace between vibeit sessions. Store state in `.vibe/vibeit-session.json` or similar.
 
+#### FR-14: Doctor Command
+**Priority**: Must Have
+**Description**: `vibeit doctor` checks system dependencies and reports status:
+- zellij: installed, minimum version
+- git: installed
+- nvim: installed
+- lazygit: installed (optional, warning if missing)
+Provides clear instructions for missing dependencies.
+
 ### Non-Functional Requirements
 
 #### Performance
@@ -298,12 +307,13 @@ Uses nvim or neovim-remote to open in existing instance or spawn new one.
 
 | Component | Technology | Rationale |
 |-----------|------------|-----------|
-| Language | Go | Fast startup, single binary, good TUI libraries |
+| Language | Go 1.24+ | Fast startup, single binary, good TUI libraries |
 | TUI Framework | [Bubble Tea](https://github.com/charmbracelet/bubbletea) | Mature, well-documented, Elm-inspired architecture |
 | Styling | [Lip Gloss](https://github.com/charmbracelet/lipgloss) | Pairs with Bubble Tea |
 | Terminal Mux | **zellij** (recommended) | Native pane management, locked mode for keybinding control, better UX than tmux for this use case |
 | Git Operations | [go-git](https://github.com/go-git/go-git) | Pure Go git implementation for status/diff |
-| Config | JSON (`.vibe/`) | Simple, already used for wt.json |
+| Config | JSON | Global (~/.config/vibeit/) + project override (.vibe/) |
+| Primary Terminal | Ghostty | Development/testing target (also test Alacritty, Kitty) |
 
 ### Why Zellij over Tmux
 
@@ -362,7 +372,7 @@ const (
 
 **Solution**: Use zellij's "locked" mode with a prefix key:
 
-1. `Ctrl+Space` (or configurable) enters vibeit command mode
+1. `Ctrl+\` (configurable) enters vibeit command mode
 2. In command mode:
    - `1-9` switches workspaces
    - `n` opens notes
@@ -393,16 +403,46 @@ project/                     # Main repo (workspace: "main")
 ../feature-auth.md           # Notes file (outside repo)
 ```
 
-### Configuration: `.vibe/vibeit.json`
+### Configuration
+
+**Global config**: `~/.config/vibeit/config.json`
+**Project override** (optional): `.vibe/vibeit.json`
+
+Project config merges with and overrides global config.
 
 ```json
 {
-  "prefix_key": "ctrl+space",
+  "prefix_key": "ctrl+\\",
   "git_poll_interval": 5,
   "default_tabs": [],
   "zellij_layout": "default"
 }
 ```
+
+### Build & Installation
+
+Simple Makefile for local development:
+
+```makefile
+PREFIX ?= ~/.local
+
+build:
+	go build -o vibeit ./cmd/vibeit
+
+install: build
+	mkdir -p $(PREFIX)/bin
+	cp vibeit $(PREFIX)/bin/
+
+clean:
+	rm -f vibeit
+
+.PHONY: build install clean
+```
+
+Usage:
+- `make build` - Build binary
+- `make install` - Install to ~/.local/bin (or custom PREFIX)
+- `make install PREFIX=/usr/local` - Install system-wide
 
 ### Technical Risks & Mitigations
 
@@ -416,10 +456,12 @@ project/                     # Main repo (workspace: "main")
 ## Implementation Plan
 
 ### Phase 1: Foundation
-**Scope**: Core TUI shell, project detection, basic worktree listing
+**Scope**: Core TUI shell, project detection, basic worktree listing, doctor command
 
 **Deliverables**:
 - [ ] Project scaffolding with Go modules
+- [ ] Makefile for build/install
+- [ ] `vibeit doctor` command (check zellij, git, nvim, lazygit)
 - [ ] Bubble Tea app skeleton
 - [ ] Top bar with project name
 - [ ] Footer with static keybindings
@@ -458,14 +500,15 @@ project/                     # Main repo (workspace: "main")
 - [ ] Open file in neovim at line from diff
 
 ### Phase 5: Notes & Polish
-**Scope**: Notes system, view modes, persistence
+**Scope**: Notes system, view modes, persistence, configuration
 
 **Deliverables**:
 - [ ] Notes file creation/opening
 - [ ] Embedded editing (spawn neovim)
 - [ ] Tile view mode (all workspaces visible)
 - [ ] Session persistence (remember open tabs)
-- [ ] Configuration file support
+- [ ] Global config file support (~/.config/vibeit/config.json)
+- [ ] Project config override (.vibe/vibeit.json)
 
 ## Testing Strategy
 
@@ -482,7 +525,7 @@ project/                     # Main repo (workspace: "main")
 
 ### End-to-End Tests
 - Full workflow: launch → create worktree → spawn tabs → switch → delete
-- Test on: Alacritty, Kitty, foot (common Linux terminals)
+- Test on: Ghostty (primary), Alacritty, Kitty
 
 ### Manual Testing
 - Keybinding conflicts with common tools (neovim, lazygit)
@@ -507,6 +550,15 @@ project/                     # Main repo (workspace: "main")
 - [ ] Replaces manual worktree workflow entirely
 - [ ] Documentation: README with install/usage
 - [ ] Single binary distribution
+
+## Decisions Made
+
+- **Prefix key**: `Ctrl+\` (configurable)
+- **Config location**: Global `~/.config/vibeit/config.json`, optional project override `.vibe/vibeit.json`
+- **Installation**: Simple Makefile with `make install PREFIX=~/.local`
+- **Go version**: 1.24+
+- **Primary terminal**: Ghostty (also test Alacritty, Kitty)
+- **Doctor command**: Yes, `vibeit doctor` checks dependencies
 
 ## Open Questions
 
