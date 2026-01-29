@@ -44,6 +44,8 @@ const (
 	TabNotes    TabType = "notes"
 )
 
+const defaultDetachKey = "C-\\"
+
 // TabCommand returns the command to run for a tab type
 func TabCommand(tabType TabType) string {
 	switch tabType {
@@ -122,7 +124,8 @@ func NextTabName(tabs []string, tabType TabType) string {
 // AttachOrCreateCmd returns a command that attaches to session, creating if needed
 func AttachOrCreateCmd(sessionName, workDir string) *exec.Cmd {
 	script := fmt.Sprintf(
-		`tmux has-session -t %q 2>/dev/null && tmux attach -t %q || tmux new-session -s %q -c %q`,
+		`%stmux has-session -t %q 2>/dev/null && tmux attach -t %q || tmux new-session -s %q -c %q`,
+		ensureDetachBindingScript(),
 		sessionName, sessionName, sessionName, workDir,
 	)
 	cmd := exec.Command("sh", "-c", script)
@@ -140,7 +143,7 @@ func OpenWithCommand(sessionName, workDir string, tabType TabType) *exec.Cmd {
 	tabName := string(tabType)
 	windowTarget := fmt.Sprintf("%s:%s", sessionName, tabName)
 	script := fmt.Sprintf(
-		`if tmux has-session -t %q 2>/dev/null; then `+
+		`%sif tmux has-session -t %q 2>/dev/null; then `+
 			`tmux new-window -t %q -n %q -c %q %q 2>/dev/null; `+
 			`tmux select-window -t %q 2>/dev/null; `+
 			`tmux attach -t %q; `+
@@ -148,6 +151,7 @@ func OpenWithCommand(sessionName, workDir string, tabType TabType) *exec.Cmd {
 			`tmux new-session -d -s %q -n %q -c %q %q; `+
 			`tmux attach -t %q; `+
 			`fi`,
+		ensureDetachBindingScript(),
 		sessionName,
 		sessionName, tabName, workDir, command,
 		windowTarget,
@@ -163,12 +167,13 @@ func OpenWithCommand(sessionName, workDir string, tabType TabType) *exec.Cmd {
 // GoToTabCmd returns a command that goes to a specific tab and attaches
 func GoToTabCmd(sessionName, workDir, tabName string) *exec.Cmd {
 	script := fmt.Sprintf(
-		`if tmux has-session -t %q 2>/dev/null; then `+
+		`%sif tmux has-session -t %q 2>/dev/null; then `+
 			`tmux select-window -t %q 2>/dev/null; `+
 			`tmux attach -t %q; `+
 			`else `+
 			`tmux new-session -s %q -n %q -c %q; `+
 			`fi`,
+		ensureDetachBindingScript(),
 		sessionName,
 		fmt.Sprintf("%s:%s", sessionName, tabName),
 		sessionName,
@@ -188,7 +193,7 @@ func NewTabCmd(sessionName, workDir, tabName string, tabType TabType) *exec.Cmd 
 	}
 
 	script := fmt.Sprintf(
-		`if tmux has-session -t %q 2>/dev/null; then `+
+		`%sif tmux has-session -t %q 2>/dev/null; then `+
 			`tmux new-window -t %q -n %q -c %q%s 2>/dev/null; `+
 			`tmux select-window -t %q 2>/dev/null; `+
 			`tmux attach -t %q; `+
@@ -196,6 +201,7 @@ func NewTabCmd(sessionName, workDir, tabName string, tabType TabType) *exec.Cmd 
 			`tmux new-session -d -s %q -n %q -c %q%s; `+
 			`tmux attach -t %q; `+
 			`fi`,
+		ensureDetachBindingScript(),
 		sessionName,
 		sessionName, tabName, workDir, cmdPart,
 		fmt.Sprintf("%s:%s", sessionName, tabName),
@@ -218,13 +224,14 @@ func GoToOrCreateSingleTabCmd(sessionName, workDir string, tabType TabType) *exe
 	}
 
 	script := fmt.Sprintf(
-		`if tmux has-session -t %q 2>/dev/null; then `+
+		`%sif tmux has-session -t %q 2>/dev/null; then `+
 			`tmux select-window -t %q 2>/dev/null || tmux new-window -t %q -n %q -c %q%s; `+
 			`tmux select-window -t %q 2>/dev/null; `+
 			`tmux attach -t %q; `+
 			`else `+
 			`tmux new-session -s %q -n %q -c %q%s; `+
 			`fi`,
+		ensureDetachBindingScript(),
 		sessionName,
 		fmt.Sprintf("%s:%s", sessionName, tabName),
 		sessionName, tabName, workDir, cmdPart,
@@ -269,4 +276,22 @@ func OpenNotesCmd(notesPath, workDir string) *exec.Cmd {
 	cmd := exec.Command("nvim", notesPath)
 	cmd.Dir = workDir
 	return cmd
+}
+
+func ensureDetachBindingScript() string {
+	key := tmuxDetachKey()
+	if key == "" {
+		return ""
+	}
+	return fmt.Sprintf("tmux bind-key -n %q detach-client 2>/dev/null; ", key)
+}
+
+func tmuxDetachKey() string {
+	if value := strings.TrimSpace(os.Getenv("VIBEIT_TMUX_DETACH_KEY")); value != "" {
+		if strings.EqualFold(value, "off") || strings.EqualFold(value, "none") {
+			return ""
+		}
+		return value
+	}
+	return defaultDetachKey
 }

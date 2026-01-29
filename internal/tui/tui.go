@@ -220,6 +220,8 @@ type Model struct {
 	tabPickerFilter  mux.TabType
 	tabPickerSession string
 	tabTypePickerIdx int
+
+	showTabPickerOnReturn bool
 }
 
 func initialModel() Model {
@@ -361,6 +363,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.gitPollActive {
 			m.gitPollActive = true
 			cmds = append(cmds, scheduleGitStatusTick())
+		}
+		if m.showTabPickerOnReturn && msg.err == nil {
+			m.showTabPickerOnReturn = false
+			model, pickerCmd := m.showTabPicker(mux.TabType(""))
+			if updated, ok := model.(Model); ok {
+				m = updated
+			}
+			if pickerCmd != nil {
+				cmds = append(cmds, pickerCmd)
+			}
+		} else {
+			m.showTabPickerOnReturn = false
 		}
 		return m, tea.Batch(cmds...)
 
@@ -530,6 +544,7 @@ func (m Model) attachSession() (tea.Model, tea.Cmd) {
 	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 
 	cmd := mux.AttachOrCreateCmd(sessionName, ws.Path)
+	m.showTabPickerOnReturn = true
 	return m, runExternalCmd(cmd)
 }
 
@@ -543,6 +558,7 @@ func (m Model) openSession(tabType mux.TabType) (tea.Model, tea.Cmd) {
 	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 
 	cmd := mux.OpenWithCommand(sessionName, ws.Path, tabType)
+	m.showTabPickerOnReturn = true
 	return m, runExternalCmd(cmd)
 }
 
@@ -555,6 +571,7 @@ func (m Model) openSingleTab(tabType mux.TabType) (tea.Model, tea.Cmd) {
 	ws := m.workspaces[m.activeIdx]
 	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 	cmd := mux.GoToOrCreateSingleTabCmd(sessionName, ws.Path, tabType)
+	m.showTabPickerOnReturn = true
 	return m, runExternalCmd(cmd)
 }
 
@@ -733,12 +750,14 @@ func (m Model) handleTabPickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 			tabName := mux.NextTabName(m.tabPickerTabs, m.tabPickerFilter)
 			cmd := mux.NewTabCmd(m.tabPickerSession, ws.Path, tabName, m.tabPickerFilter)
+			m.showTabPickerOnReturn = true
 			return m, runExternalCmd(cmd)
 		}
 
 		// Go to selected existing tab
 		tabName := m.tabPickerTabs[m.tabPickerIdx]
 		cmd := mux.GoToTabCmd(m.tabPickerSession, ws.Path, tabName)
+		m.showTabPickerOnReturn = true
 		return m, runExternalCmd(cmd)
 
 	// Quick select by number
@@ -782,6 +801,7 @@ func (m Model) handleTabTypePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		tabType := options[m.tabTypePickerIdx]
 		tabName := mux.NextTabName(m.tabPickerTabs, tabType)
 		cmd := mux.NewTabCmd(m.tabPickerSession, ws.Path, tabName, tabType)
+		m.showTabPickerOnReturn = true
 		return m, runExternalCmd(cmd)
 
 	case "1", "2", "3", "4":
@@ -1086,7 +1106,7 @@ func (m Model) renderMainContent(height int) string {
 
 	sessionHint := ""
 	if sessionStatus == "session active" {
-		sessionHint = helpTextStyle.Render("\n\nTip: In tmux, press Ctrl+b then d to detach (keeps session alive)")
+		sessionHint = helpTextStyle.Render("\n\nTip: In tmux, press Ctrl+\\ to detach (keeps session alive)")
 	}
 
 	gitStatus := statusText(ws)
