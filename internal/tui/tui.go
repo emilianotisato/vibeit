@@ -351,13 +351,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.workspaces) == 0 && m.err == nil {
 			m.err = fmt.Errorf("not a git repository")
 		}
+		cmds := []tea.Cmd{
+			refreshGitStatus(m.workspaces, m.projectPath, m.projectName),
+		}
 		if !m.gitPollActive {
 			m.gitPollActive = true
-			return m, tea.Batch(
-				refreshGitStatus(m.workspaces, m.projectPath, m.projectName),
-				scheduleGitStatusTick(),
-			)
+			cmds = append(cmds, scheduleGitStatusTick())
 		}
+		return m, tea.Batch(cmds...)
 
 	case externalCmdFinishedMsg:
 		if msg.err != nil {
@@ -1026,14 +1027,15 @@ func (m Model) renderMainContent(height int) string {
 		}
 	}
 
-	if ws.NotesExists {
-		content.WriteString("\nNotes:\n")
-		if len(ws.NotesPreview) == 0 {
-			content.WriteString("  (empty)\n")
-		} else {
-			for _, line := range ws.NotesPreview {
-				content.WriteString("  " + line + "\n")
-			}
+	content.WriteString("\nNotes:\n")
+	if !ws.NotesExists {
+		content.WriteString("  (no notes yet)\n")
+		content.WriteString("  Press n to create\n")
+	} else if len(ws.NotesPreview) == 0 {
+		content.WriteString("  (empty)\n")
+	} else {
+		for _, line := range ws.NotesPreview {
+			content.WriteString("  " + line + "\n")
 		}
 	}
 
