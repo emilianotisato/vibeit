@@ -420,7 +420,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.KillSession):
 			if len(m.workspaces) > 0 {
 				ws := m.workspaces[m.activeIdx]
-				sessionName := mux.SessionName(m.projectName, ws.Name)
+				sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 				if err := mux.DeleteSession(sessionName); err != nil {
 					m.statusMessage = errorStyle.Render(fmt.Sprintf("Failed to kill session: %v", err))
 				} else {
@@ -446,7 +446,7 @@ func (m Model) attachSession() (tea.Model, tea.Cmd) {
 	}
 
 	ws := m.workspaces[m.activeIdx]
-	sessionName := mux.SessionName(m.projectName, ws.Name)
+	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 
 	cmd := mux.AttachOrCreateCmd(sessionName, ws.Path)
 	return m, runExternalCmd(cmd)
@@ -459,7 +459,7 @@ func (m Model) openSession(tabType mux.TabType) (tea.Model, tea.Cmd) {
 	}
 
 	ws := m.workspaces[m.activeIdx]
-	sessionName := mux.SessionName(m.projectName, ws.Name)
+	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 
 	cmd := mux.OpenWithCommand(sessionName, ws.Path, tabType)
 	return m, runExternalCmd(cmd)
@@ -472,7 +472,7 @@ func (m Model) openSingleTab(tabType mux.TabType) (tea.Model, tea.Cmd) {
 	}
 
 	ws := m.workspaces[m.activeIdx]
-	sessionName := mux.SessionName(m.projectName, ws.Name)
+	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 	cmd := mux.GoToOrCreateSingleTabCmd(sessionName, ws.Path, tabType)
 	return m, runExternalCmd(cmd)
 }
@@ -484,7 +484,7 @@ func (m Model) showTabPicker(filter mux.TabType) (tea.Model, tea.Cmd) {
 	}
 
 	ws := m.workspaces[m.activeIdx]
-	sessionName := mux.SessionName(m.projectName, ws.Name)
+	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 
 	var tabs []string
 	if mux.SessionExists(sessionName) {
@@ -862,7 +862,7 @@ func (m Model) renderTopBar() string {
 		}
 
 		// Show tmux session indicator
-		sessionName := mux.SessionName(m.projectName, ws.Name)
+		sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 		if mux.SessionExists(sessionName) {
 			name += " ●"
 		}
@@ -904,7 +904,7 @@ func (m Model) renderMainContent(height int) string {
 		wtType = "worktree"
 	}
 
-	sessionName := mux.SessionName(m.projectName, ws.Name)
+	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
 	sessionStatus := "no session"
 	if mux.SessionExists(sessionName) {
 		sessionStatus = "session active"

@@ -9,8 +9,13 @@ import (
 )
 
 // SessionName generates a tmux session name for a workspace
-func SessionName(projectName, workspaceName string) string {
-	return fmt.Sprintf("vibeit-%s-%s", sanitize(projectName), sanitize(workspaceName))
+func SessionName(projectName, workspaceName, branchName string) string {
+	return fmt.Sprintf(
+		"vibeit-%s-%s-%s",
+		sanitize(projectName),
+		sanitize(workspaceName),
+		sanitize(branchName),
+	)
 }
 
 // sanitize removes characters that might cause issues in session names
