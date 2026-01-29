@@ -153,6 +153,7 @@ type keyMap struct {
 	Codex       key.Binding
 	Neovim      key.Binding
 	Notes       key.Binding
+	Config      key.Binding
 	Worktree    key.Binding
 	Delete      key.Binding
 	KillSession key.Binding
@@ -197,6 +198,10 @@ var keys = keyMap{
 		key.WithKeys("n"),
 		key.WithHelp("n", "notes"),
 	),
+	Config: key.NewBinding(
+		key.WithKeys("e"),
+		key.WithHelp("e", "wt.json"),
+	),
 	Worktree: key.NewBinding(
 		key.WithKeys("w"),
 		key.WithHelp("w", "new worktree"),
@@ -220,16 +225,17 @@ var keys = keyMap{
 }
 
 type Model struct {
-	projectName   string
-	projectPath   string
-	workspaces    []workspace.Workspace
-	activeIdx     int
-	width         int
-	height        int
-	err           error
-	ready         bool
-	statusMessage string
-	gitPollActive bool
+	projectName    string
+	projectPath    string
+	workspaces     []workspace.Workspace
+	activeIdx      int
+	width          int
+	height         int
+	err            error
+	ready          bool
+	statusMessage  string
+	gitPollActive  bool
+	wtConfigExists bool
 
 	// Modal state
 	modal           modalType
@@ -279,10 +285,11 @@ func initialModel() Model {
 
 // Messages
 type workspacesLoadedMsg struct {
-	projectName string
-	projectPath string
-	workspaces  []workspace.Workspace
-	err         error
+	projectName  string
+	projectPath  string
+	workspaces   []workspace.Workspace
+	configExists bool
+	err          error
 }
 
 type externalCmdFinishedMsg struct {
@@ -309,11 +316,16 @@ func loadWorkspaces() tea.Msg {
 	projectName, _ := workspace.GetProjectName()
 	projectPath, _ := workspace.GetProjectPath()
 	workspaces, err := workspace.Detect()
+	configExists := false
+	if projectPath != "" {
+		configExists = worktree.ConfigExists(projectPath)
+	}
 	return workspacesLoadedMsg{
-		projectName: projectName,
-		projectPath: projectPath,
-		workspaces:  workspaces,
-		err:         err,
+		projectName:  projectName,
+		projectPath:  projectPath,
+		workspaces:   workspaces,
+		configExists: configExists,
+		err:          err,
 	}
 }
 
@@ -385,6 +397,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.projectName = msg.projectName
 		m.projectPath = msg.projectPath
 		m.workspaces = msg.workspaces
+		m.wtConfigExists = msg.configExists
 		m.err = msg.err
 		if len(m.workspaces) == 0 && m.err == nil {
 			m.err = fmt.Errorf("not a git repository")
@@ -510,6 +523,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.workspaces) > 0 {
 				return m.openNotes()
 			}
+
+		case key.Matches(msg, keys.Config):
+			return m.openWorktreeConfig()
 
 		case key.Matches(msg, keys.Worktree):
 			m.modal = modalNewWorktree
@@ -648,6 +664,26 @@ func (m Model) openNotes() (tea.Model, tea.Cmd) {
 	// Open notes in nvim directly (without tmux for simplicity)
 	cmd := exec.Command("nvim", notesPath)
 	cmd.Dir = ws.Path
+	return m, runExternalCmd(cmd)
+}
+
+func (m Model) openWorktreeConfig() (tea.Model, tea.Cmd) {
+	if m.projectPath == "" {
+		m.statusMessage = errorStyle.Render("Cannot locate repository path")
+		return m, nil
+	}
+
+	configPath, created, err := worktree.EnsureConfig(m.projectPath)
+	if err != nil {
+		m.statusMessage = errorStyle.Render(fmt.Sprintf("Failed to open wt.json: %v", err))
+		return m, nil
+	}
+	if created {
+		m.statusMessage = successStyle.Render("Created .vibe/wt.json")
+	}
+
+	cmd := exec.Command("nvim", configPath)
+	cmd.Dir = m.projectPath
 	return m, runExternalCmd(cmd)
 }
 
@@ -1167,6 +1203,11 @@ func (m Model) renderWorkspacePanel(ws workspace.Workspace, width int) string {
 		sessionValue = pillInfoStyle.Render("ACTIVE")
 	}
 
+	configValue := pillGoodStyle.Render("OK")
+	if !m.wtConfigExists {
+		configValue = pillWarnStyle.Render("MISSING")
+	}
+
 	var content strings.Builder
 	content.WriteString(sectionTitleStyle.Render("WORKSPACE"))
 	content.WriteString("\n")
@@ -1179,10 +1220,17 @@ func (m Model) renderWorkspacePanel(ws workspace.Workspace, width int) string {
 	content.WriteString(formatLabelValue("Path", truncateMiddle(ws.Path, width-labelWidth-1), labelWidth, width))
 	content.WriteString("\n")
 	content.WriteString(formatLabelLine("Session", sessionValue, labelWidth))
+	content.WriteString("\n")
+	content.WriteString(formatLabelLine("WT cfg", configValue, labelWidth))
 
 	if sessionActive {
 		content.WriteString("\n")
 		content.WriteString(helpTextStyle.Render("Detach: Ctrl+\\"))
+	}
+
+	if !m.wtConfigExists {
+		content.WriteString("\n")
+		content.WriteString(helpTextStyle.Render("Press e to edit .vibe/wt.json"))
 	}
 
 	if msg := styleStatusMessage(m.statusMessage); msg != "" {
@@ -1491,6 +1539,7 @@ func (m Model) renderFooter() string {
 		{"v", "nvim"},
 		{"t", "term"},
 		{"n", "notes"},
+		{"e", "wt.json"},
 		{"w", "new wt"},
 		{"d", "del wt"},
 		{"k", "kill ses"},

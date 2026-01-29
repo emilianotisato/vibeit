@@ -16,6 +16,17 @@ type Config struct {
 	After  []string `json:"after"`
 }
 
+const defaultConfig = `{
+    "before": [],
+    "copy": [
+        ".env",
+        "node_modules",
+        "vendor"
+    ],
+    "after": []
+}
+`
+
 // Create creates a new worktree with the given branch name
 func Create(repoPath, branchName, baseBranch string) (string, error) {
 	projectName := filepath.Base(repoPath)
@@ -42,9 +53,39 @@ func Create(repoPath, branchName, baseBranch string) (string, error) {
 	return worktreePath, nil
 }
 
+// ConfigPath returns the path to .vibe/wt.json in the main repo.
+func ConfigPath(repoPath string) string {
+	return filepath.Join(repoPath, ".vibe", "wt.json")
+}
+
+// ConfigExists reports whether .vibe/wt.json exists.
+func ConfigExists(repoPath string) bool {
+	_, err := os.Stat(ConfigPath(repoPath))
+	return err == nil
+}
+
+// EnsureConfig creates .vibe/wt.json with a default template when missing.
+func EnsureConfig(repoPath string) (string, bool, error) {
+	path := ConfigPath(repoPath)
+	if _, err := os.Stat(path); err == nil {
+		return path, false, nil
+	} else if !os.IsNotExist(err) {
+		return "", false, err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return "", false, err
+	}
+	if err := os.WriteFile(path, []byte(defaultConfig), 0644); err != nil {
+		return "", false, err
+	}
+
+	return path, true, nil
+}
+
 // Init initializes a worktree by running .vibe/wt.json config
 func Init(mainRepoPath, worktreePath string) error {
-	configPath := filepath.Join(mainRepoPath, ".vibe", "wt.json")
+	configPath := ConfigPath(mainRepoPath)
 
 	// Check if config exists
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {

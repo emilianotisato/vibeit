@@ -8,7 +8,8 @@ build:
 
 install: build
 	mkdir -p $(PREFIX)/bin
-	cp $(BINARY) $(PREFIX)/bin/
+	cp $(BINARY) $(PREFIX)/bin/$(BINARY).tmp
+	mv -f $(PREFIX)/bin/$(BINARY).tmp $(PREFIX)/bin/$(BINARY)
 
 uninstall:
 	rm -f $(PREFIX)/bin/$(BINARY)
