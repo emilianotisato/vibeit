@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/emilianotisato/vibeit/internal/mux"
 	"github.com/emilianotisato/vibeit/internal/workspace"
 	"github.com/emilianotisato/vibeit/internal/worktree"
 )
@@ -21,6 +22,7 @@ const (
 	modalNone modalType = iota
 	modalNewWorktree
 	modalDeleteWorktree
+	modalNewTab
 )
 
 // Styles
@@ -93,6 +95,13 @@ var (
 
 	successStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("46"))
+
+	menuItemStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252"))
+
+	menuSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("212")).
+				Bold(true)
 )
 
 type keyMap struct {
@@ -104,6 +113,7 @@ type keyMap struct {
 	Notes      key.Binding
 	Worktree   key.Binding
 	Delete     key.Binding
+	Enter      key.Binding
 	CommandKey key.Binding
 }
 
@@ -122,7 +132,7 @@ var keys = keyMap{
 	),
 	NewTerm: key.NewBinding(
 		key.WithKeys("t"),
-		key.WithHelp("t", "terminal"),
+		key.WithHelp("t", "new tab"),
 	),
 	Git: key.NewBinding(
 		key.WithKeys("g"),
@@ -140,10 +150,28 @@ var keys = keyMap{
 		key.WithKeys("d"),
 		key.WithHelp("d", "delete worktree"),
 	),
+	Enter: key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "open session"),
+	),
 	CommandKey: key.NewBinding(
 		key.WithKeys("ctrl+\\"),
 		key.WithHelp("C-\\", "command mode"),
 	),
+}
+
+// Tab menu options
+type tabOption struct {
+	label   string
+	tabType mux.TabType
+	key     string
+}
+
+var tabOptions = []tabOption{
+	{label: "Terminal", tabType: mux.TabTerminal, key: "t"},
+	{label: "Lazygit", tabType: mux.TabLazygit, key: "g"},
+	{label: "Claude", tabType: mux.TabClaude, key: "c"},
+	{label: "Codex", tabType: mux.TabCodex, key: "x"},
 }
 
 type Model struct {
@@ -165,6 +193,9 @@ type Model struct {
 	// Delete confirmation
 	deleteConfirm bool
 	deleteNotes   bool
+
+	// Tab menu selection
+	tabMenuIdx int
 }
 
 func initialModel() Model {
@@ -189,7 +220,7 @@ type workspacesLoadedMsg struct {
 	err         error
 }
 
-type lazygitFinishedMsg struct {
+type externalCmdFinishedMsg struct {
 	err error
 }
 
@@ -221,9 +252,7 @@ func createWorktree(repoPath, branchName string) tea.Cmd {
 			return worktreeCreatedMsg{err: err}
 		}
 
-		// Run init
 		if initErr := worktree.Init(repoPath, wtPath); initErr != nil {
-			// Log but don't fail
 			return worktreeCreatedMsg{path: wtPath, err: nil}
 		}
 
@@ -236,6 +265,12 @@ func deleteWorktree(repoPath, wtPath, branchName string, deleteNotes bool) tea.C
 		err := worktree.Delete(repoPath, wtPath, branchName, deleteNotes)
 		return worktreeDeletedMsg{err: err}
 	}
+}
+
+func runExternalCmd(cmd *exec.Cmd) tea.Cmd {
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return externalCmdFinishedMsg{err}
+	})
 }
 
 func (m Model) Init() tea.Cmd {
@@ -258,9 +293,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = fmt.Errorf("not a git repository")
 		}
 
-	case lazygitFinishedMsg:
+	case externalCmdFinishedMsg:
 		if msg.err != nil {
-			m.statusMessage = fmt.Sprintf("lazygit error: %v", msg.err)
+			m.statusMessage = errorStyle.Render(fmt.Sprintf("Error: %v", msg.err))
 		}
 		return m, loadWorkspaces
 
@@ -281,7 +316,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMessage = errorStyle.Render(fmt.Sprintf("Error: %v", msg.err))
 		} else {
 			m.statusMessage = successStyle.Render("Worktree deleted")
-			// Adjust active index if needed
 			if m.activeIdx >= len(m.workspaces)-1 && m.activeIdx > 0 {
 				m.activeIdx--
 			}
@@ -289,12 +323,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, loadWorkspaces
 
 	case tea.KeyMsg:
-		// Handle modal input first
 		if m.modal != modalNone {
 			return m.handleModalInput(msg)
 		}
 
-		// Clear status message on any key
 		m.statusMessage = ""
 
 		switch {
@@ -311,17 +343,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeIdx = (m.activeIdx - 1 + len(m.workspaces)) % len(m.workspaces)
 			}
 
-		case key.Matches(msg, keys.Git):
+		case key.Matches(msg, keys.Enter):
+			// Open zellij session for current workspace
 			if len(m.workspaces) > 0 {
-				ws := m.workspaces[m.activeIdx]
-				return m, runLazygit(ws.Path)
+				return m.openSession(mux.TabTerminal)
 			}
 
 		case key.Matches(msg, keys.NewTerm):
-			m.statusMessage = "Terminal: requires zellij (coming in Phase 3)"
+			// Show tab type selection modal
+			m.modal = modalNewTab
+			m.tabMenuIdx = 0
+			m.modalError = ""
+
+		case key.Matches(msg, keys.Git):
+			if len(m.workspaces) > 0 {
+				return m.openSession(mux.TabLazygit)
+			}
 
 		case key.Matches(msg, keys.Notes):
-			m.statusMessage = "Notes: coming in Phase 5"
+			if len(m.workspaces) > 0 {
+				return m.openNotes()
+			}
 
 		case key.Matches(msg, keys.Worktree):
 			m.modal = modalNewWorktree
@@ -354,6 +396,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) openSession(tabType mux.TabType) (tea.Model, tea.Cmd) {
+	if !mux.IsZellijInstalled() {
+		m.statusMessage = errorStyle.Render("zellij not installed. Run 'vibeit doctor' for help.")
+		return m, nil
+	}
+
+	ws := m.workspaces[m.activeIdx]
+	sessionName := mux.SessionName(m.projectName, ws.Name)
+
+	// Use attach --create which handles both cases
+	cmd := mux.AttachOrCreateCmd(sessionName, ws.Path)
+	cmd.Dir = ws.Path
+	return m, runExternalCmd(cmd)
+}
+
+func (m Model) openNotes() (tea.Model, tea.Cmd) {
+	ws := m.workspaces[m.activeIdx]
+	parentDir := filepath.Dir(m.projectPath)
+	notesPath := filepath.Join(parentDir, ws.Branch+".md")
+
+	// Open notes in nvim directly (without zellij for simplicity)
+	cmd := exec.Command("nvim", notesPath)
+	cmd.Dir = ws.Path
+	return m, runExternalCmd(cmd)
+}
+
 func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.modal {
 	case modalNewWorktree:
@@ -367,7 +435,6 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.modalError = "Branch name cannot be empty"
 				return m, nil
 			}
-			// Validate branch name (simple check)
 			if strings.ContainsAny(branchName, " \t\n\\:*?\"<>|") {
 				m.modalError = "Invalid branch name"
 				return m, nil
@@ -394,12 +461,41 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, deleteWorktree(m.projectPath, ws.Path, ws.Branch, m.deleteNotes)
 		case "n", "N":
 			if m.deleteConfirm {
-				// Toggle notes deletion
 				m.deleteNotes = !m.deleteNotes
 			} else {
 				m.modal = modalNone
 			}
 			return m, nil
+		}
+
+	case modalNewTab:
+		switch msg.String() {
+		case "esc":
+			m.modal = modalNone
+			return m, nil
+		case "up", "k":
+			if m.tabMenuIdx > 0 {
+				m.tabMenuIdx--
+			}
+		case "down", "j":
+			if m.tabMenuIdx < len(tabOptions)-1 {
+				m.tabMenuIdx++
+			}
+		case "enter":
+			m.modal = modalNone
+			return m.openSession(tabOptions[m.tabMenuIdx].tabType)
+		case "t":
+			m.modal = modalNone
+			return m.openSession(mux.TabTerminal)
+		case "g":
+			m.modal = modalNone
+			return m.openSession(mux.TabLazygit)
+		case "c":
+			m.modal = modalNone
+			return m.openSession(mux.TabClaude)
+		case "x":
+			m.modal = modalNone
+			return m.openSession(mux.TabCodex)
 		}
 	}
 
@@ -417,18 +513,14 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	// Top bar
 	b.WriteString(m.renderTopBar())
 	b.WriteString("\n")
 
-	// Main content area
 	contentHeight := m.height - 4
 	b.WriteString(m.renderMainContent(contentHeight))
 
-	// Footer
 	b.WriteString(m.renderFooter())
 
-	// Modal overlay
 	if m.modal != modalNone {
 		return m.renderWithModal(b.String())
 	}
@@ -444,26 +536,24 @@ func (m Model) renderWithModal(background string) string {
 		modal = m.renderNewWorktreeModal()
 	case modalDeleteWorktree:
 		modal = m.renderDeleteWorktreeModal()
+	case modalNewTab:
+		modal = m.renderNewTabModal()
 	}
 
-	// Center the modal
 	lines := strings.Split(background, "\n")
 	modalLines := strings.Split(modal, "\n")
 
-	// Calculate vertical position (roughly center)
 	startLine := (len(lines) - len(modalLines)) / 2
 	if startLine < 2 {
 		startLine = 2
 	}
 
-	// Calculate horizontal padding for centering
 	modalWidth := lipgloss.Width(modal)
 	leftPad := (m.width - modalWidth) / 2
 	if leftPad < 0 {
 		leftPad = 0
 	}
 
-	// Overlay modal on background
 	for i, modalLine := range modalLines {
 		lineIdx := startLine + i
 		if lineIdx < len(lines) {
@@ -525,6 +615,34 @@ func (m Model) renderDeleteWorktreeModal() string {
 	return modalStyle.Render(content.String())
 }
 
+func (m Model) renderNewTabModal() string {
+	var content strings.Builder
+
+	content.WriteString(modalTitleStyle.Render("Open Tab"))
+	content.WriteString("\n\n")
+
+	for i, opt := range tabOptions {
+		prefix := "  "
+		style := menuItemStyle
+		if i == m.tabMenuIdx {
+			prefix = "> "
+			style = menuSelectedStyle
+		}
+		content.WriteString(style.Render(fmt.Sprintf("%s[%s] %s", prefix, opt.key, opt.label)))
+		content.WriteString("\n")
+	}
+
+	if m.modalError != "" {
+		content.WriteString("\n")
+		content.WriteString(errorStyle.Render(m.modalError))
+	}
+
+	content.WriteString("\n")
+	content.WriteString(modalHintStyle.Render("Enter/key to open • Esc to cancel"))
+
+	return modalStyle.Render(content.String())
+}
+
 func (m Model) renderTopBar() string {
 	projectPart := projectNameStyle.Render(m.projectName)
 
@@ -533,6 +651,12 @@ func (m Model) renderTopBar() string {
 		name := ws.Name
 		if ws.IsDirty {
 			name += dirtyIndicator.String()
+		}
+
+		// Show zellij session indicator
+		sessionName := mux.SessionName(m.projectName, ws.Name)
+		if mux.SessionExists(sessionName) {
+			name += " ●"
 		}
 
 		numPrefix := fmt.Sprintf("%d:", i+1)
@@ -572,19 +696,33 @@ func (m Model) renderMainContent(height int) string {
 		wtType = "worktree"
 	}
 
+	sessionName := mux.SessionName(m.projectName, ws.Name)
+	sessionStatus := "no session"
+	if mux.SessionExists(sessionName) {
+		sessionStatus = "session active"
+	}
+
+	sessionHint := ""
+	if sessionStatus == "session active" {
+		sessionHint = helpTextStyle.Render("\n\nTip: In zellij, press Ctrl+o then d to detach (keeps session alive)")
+	}
+
 	content := fmt.Sprintf(
 		"Workspace: %s (%s)\n"+
 			"Path: %s\n"+
 			"Branch: %s\n"+
-			"Status: %s%s\n\n"+
+			"Git: %s\n"+
+			"Session: %s%s%s\n\n"+
 			"%s",
 		ws.Name,
 		wtType,
 		ws.Path,
 		ws.Branch,
 		statusText(ws),
+		sessionStatus,
 		statusLine,
-		helpTextStyle.Render("g:lazygit  w:new worktree  d:delete worktree  t:terminal  n:notes"),
+		sessionHint,
+		helpTextStyle.Render("Enter:session  t:new tab  g:lazygit  n:notes  w:worktree  d:delete  q:quit"),
 	)
 
 	lines := strings.Split(content, "\n")
@@ -597,7 +735,7 @@ func (m Model) renderMainContent(height int) string {
 
 func statusText(ws workspace.Workspace) string {
 	if ws.IsDirty {
-		return "dirty (uncommitted changes)"
+		return "dirty"
 	}
 	return "clean"
 }
@@ -607,12 +745,12 @@ func (m Model) renderFooter() string {
 		key  string
 		desc string
 	}{
-		{"g", "lazygit"},
+		{"Enter", "session"},
+		{"t", "tab"},
+		{"g", "git"},
+		{"n", "notes"},
 		{"w", "worktree"},
 		{"d", "delete"},
-		{"t", "terminal"},
-		{"n", "notes"},
-		{"1-9", "switch"},
 		{"q", "quit"},
 	}
 
@@ -630,14 +768,6 @@ func (m Model) renderFooter() string {
 	}
 
 	return footerStyle.Width(m.width).Render(content + strings.Repeat(" ", padding))
-}
-
-func runLazygit(path string) tea.Cmd {
-	c := exec.Command("lazygit")
-	c.Dir = path
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return lazygitFinishedMsg{err}
-	})
 }
 
 func Run() error {
