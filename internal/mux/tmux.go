@@ -45,6 +45,7 @@ const (
 )
 
 const defaultDetachKey = "C-\\"
+const defaultLastWindowKey = "C-]"
 
 // TabCommand returns the command to run for a tab type
 func TabCommand(tabType TabType) string {
@@ -279,11 +280,19 @@ func OpenNotesCmd(notesPath, workDir string) *exec.Cmd {
 }
 
 func ensureDetachBindingScript() string {
-	key := tmuxDetachKey()
-	if key == "" {
-		return ""
+	var script string
+
+	// Detach binding
+	if key := tmuxDetachKey(); key != "" {
+		script += fmt.Sprintf("tmux bind-key -n %q detach-client 2>/dev/null; ", key)
 	}
-	return fmt.Sprintf("tmux bind-key -n %q detach-client 2>/dev/null; ", key)
+
+	// Last window binding (switch to previous active tab)
+	if key := tmuxLastWindowKey(); key != "" {
+		script += fmt.Sprintf("tmux bind-key -n %q last-window 2>/dev/null; ", key)
+	}
+
+	return script
 }
 
 func tmuxDetachKey() string {
@@ -294,4 +303,14 @@ func tmuxDetachKey() string {
 		return value
 	}
 	return defaultDetachKey
+}
+
+func tmuxLastWindowKey() string {
+	if value := strings.TrimSpace(os.Getenv("VIBEIT_TMUX_LAST_WINDOW_KEY")); value != "" {
+		if strings.EqualFold(value, "off") || strings.EqualFold(value, "none") {
+			return ""
+		}
+		return value
+	}
+	return defaultLastWindowKey
 }

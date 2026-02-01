@@ -1225,7 +1225,7 @@ func (m Model) renderWorkspacePanel(ws workspace.Workspace, width int) string {
 
 	if sessionActive {
 		content.WriteString("\n")
-		content.WriteString(helpTextStyle.Render("Detach: Ctrl+\\"))
+		content.WriteString(helpTextStyle.Render("Detach: Ctrl+\\  Last tab: Ctrl+]"))
 	}
 
 	if !m.wtConfigExists {
