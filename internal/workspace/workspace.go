@@ -3,171 +3,129 @@ package workspace
 import (
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
+	"strconv"
 
 	"github.com/go-git/go-git/v5"
 )
 
-// Workspace represents the main repo or a worktree
+// Workspace represents the main repo or a sibling workspace ({projectName}-wt-N)
 type Workspace struct {
-	Name          string
-	Path          string
-	Branch        string
-	IsWorktree    bool
-	IsDirty       bool
-	Ahead         int
-	Behind        int
-	StashCount    int
-	RecentCommits []string
-	NotesExists   bool
-	NotesPreview  []string
+	Name           string
+	Path           string
+	Branch         string
+	IsSubWorkspace bool
+	IsDirty        bool
+	Ahead          int
+	Behind         int
+	StashCount     int
+	RecentCommits  []string
+	NotesExists    bool
+	NotesPreview   []string
 }
 
-// Detect finds the main repo and all worktrees from the current directory
+// Detect finds the main repo and all sibling workspaces from the current directory
 func Detect() ([]Workspace, error) {
-	cwd, err := os.Getwd()
+	projectPath, err := GetProjectPath()
 	if err != nil {
 		return nil, err
 	}
 
-	// Open the git repository
-	repo, err := git.PlainOpenWithOptions(cwd, &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
-	if err != nil {
-		return nil, err
-	}
+	workspaces := listSiblingWorkspaces(projectPath)
 
-	var workspaces []Workspace
-
-	// Get worktree list using git command (go-git doesn't have great worktree support)
-	worktrees, err := listWorktrees(cwd)
-	if err != nil {
-		// Fallback: just use current directory
-		ws, err := getWorkspaceInfo(cwd, repo, false)
-		if err != nil {
-			return nil, err
-		}
-		ws = UpdateGitStatus(ws)
-		return []Workspace{ws}, nil
-	}
-
-	for i, wt := range worktrees {
-		isMain := i == 0 // First worktree is typically the main one
-		ws, err := getWorkspaceInfo(wt.Path, repo, !isMain)
-		if err != nil {
-			continue
-		}
-		ws = UpdateGitStatus(ws)
-		workspaces = append(workspaces, ws)
+	// Get git status for each workspace
+	for i := range workspaces {
+		workspaces[i] = UpdateGitStatus(workspaces[i])
 	}
 
 	return workspaces, nil
 }
 
-type worktreeInfo struct {
-	Path   string
-	Branch string
-}
+// listSiblingWorkspaces scans parent directory for main workspace and {projectName}-wt-N siblings
+func listSiblingWorkspaces(mainRepoPath string) []Workspace {
+	var workspaces []Workspace
 
-func listWorktrees(repoPath string) ([]worktreeInfo, error) {
-	// Find git directory
-	repo, err := git.PlainOpenWithOptions(repoPath, &git.PlainOpenOptions{
-		DetectDotGit: true,
-	})
-	if err != nil {
-		return nil, err
+	projectName := filepath.Base(mainRepoPath)
+	parentDir := filepath.Dir(mainRepoPath)
+
+	// Add main workspace first
+	mainWs := Workspace{
+		Path:           mainRepoPath,
+		Name:           projectName,
+		IsSubWorkspace: false,
 	}
-
-	wt, err := repo.Worktree()
-	if err != nil {
-		return nil, err
-	}
-
-	// Get the main worktree path
-	mainPath := wt.Filesystem.Root()
-
-	// Check for worktrees directory
-	gitDir := filepath.Join(mainPath, ".git")
-	info, err := os.Stat(gitDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var worktreesDir string
-	if info.IsDir() {
-		worktreesDir = filepath.Join(gitDir, "worktrees")
-	} else {
-		// .git is a file (we're in a worktree), read it to find the real git dir
-		content, err := os.ReadFile(gitDir)
-		if err != nil {
-			return nil, err
-		}
-		line := strings.TrimSpace(string(content))
-		if strings.HasPrefix(line, "gitdir: ") {
-			realGitDir := strings.TrimPrefix(line, "gitdir: ")
-			// Go up from worktrees/<name> to the main .git
-			worktreesDir = filepath.Dir(realGitDir)
-			mainPath = filepath.Dir(filepath.Dir(worktreesDir))
+	// Get branch for main
+	if repo, err := git.PlainOpen(mainRepoPath); err == nil {
+		if head, err := repo.Head(); err == nil {
+			mainWs.Branch = head.Name().Short()
 		}
 	}
+	workspaces = append(workspaces, mainWs)
 
-	// Start with main worktree
-	worktrees := []worktreeInfo{{Path: mainPath, Branch: "main"}}
+	// Scan parent directory for {projectName}-wt-1 through {projectName}-wt-9
+	// Pattern: {projectName}-wt-{N}
+	wtPattern := regexp.MustCompile(`^` + regexp.QuoteMeta(projectName) + `-wt-(\d+)$`)
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		return workspaces
+	}
 
-	// Find additional worktrees
-	if worktreesDir != "" {
-		entries, err := os.ReadDir(worktreesDir)
-		if err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-				wtPath := filepath.Join(worktreesDir, entry.Name(), "gitdir")
-				content, err := os.ReadFile(wtPath)
-				if err != nil {
-					continue
-				}
-				path := strings.TrimSpace(string(content))
-				// The gitdir file contains the path to the worktree's .git file
-				// We need the parent directory
-				path = filepath.Dir(path)
-				worktrees = append(worktrees, worktreeInfo{
-					Path:   path,
-					Branch: entry.Name(),
-				})
+	// Collect valid workspace directories with their numbers for sorting
+	type wtDir struct {
+		num  int
+		path string
+		name string
+	}
+	var wtDirs []wtDir
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		matches := wtPattern.FindStringSubmatch(entry.Name())
+		if matches == nil {
+			continue
+		}
+		num, _ := strconv.Atoi(matches[1])
+		if num < 1 || num > 9 {
+			continue
+		}
+
+		wtPath := filepath.Join(parentDir, entry.Name())
+		// Verify it's a git repo
+		if _, err := os.Stat(filepath.Join(wtPath, ".git")); err != nil {
+			continue
+		}
+
+		wtDirs = append(wtDirs, wtDir{num: num, path: wtPath, name: entry.Name()})
+	}
+
+	// Sort by number
+	for i := 0; i < len(wtDirs); i++ {
+		for j := i + 1; j < len(wtDirs); j++ {
+			if wtDirs[j].num < wtDirs[i].num {
+				wtDirs[i], wtDirs[j] = wtDirs[j], wtDirs[i]
 			}
 		}
 	}
 
-	return worktrees, nil
-}
-
-func getWorkspaceInfo(path string, repo *git.Repository, isWorktree bool) (Workspace, error) {
-	ws := Workspace{
-		Path:       path,
-		IsWorktree: isWorktree,
-	}
-
-	// Get name from directory
-	ws.Name = filepath.Base(path)
-
-	// Try to get branch name
-	head, err := repo.Head()
-	if err == nil {
-		ws.Branch = head.Name().Short()
-	}
-
-	// Check if dirty
-	wt, err := repo.Worktree()
-	if err == nil {
-		status, err := wt.Status()
-		if err == nil {
-			ws.IsDirty = !status.IsClean()
+	// Add to workspaces
+	for _, wt := range wtDirs {
+		ws := Workspace{
+			Path:           wt.path,
+			Name:           wt.name,
+			IsSubWorkspace: true,
 		}
+		// Get branch
+		if repo, err := git.PlainOpen(wt.path); err == nil {
+			if head, err := repo.Head(); err == nil {
+				ws.Branch = head.Name().Short()
+			}
+		}
+		workspaces = append(workspaces, ws)
 	}
 
-	return ws, nil
+	return workspaces
 }
 
 // GetProjectName returns the name of the project based on the repo root
@@ -181,12 +139,14 @@ func GetProjectName() (string, error) {
 }
 
 // GetProjectPath returns the root path of the main repository
+// If inside a {projectName}-wt-N sibling directory, derives the main repo path
 func GetProjectPath() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
 
+	// First, find the git root of the current directory
 	repo, err := git.PlainOpenWithOptions(cwd, &git.PlainOpenOptions{
 		DetectDotGit: true,
 	})
@@ -199,32 +159,24 @@ func GetProjectPath() (string, error) {
 		return cwd, err
 	}
 
-	// Get the root path
-	root := wt.Filesystem.Root()
+	repoRoot := wt.Filesystem.Root()
 
-	// If we're in a worktree, find the main repo
-	gitPath := filepath.Join(root, ".git")
-	info, err := os.Stat(gitPath)
-	if err != nil {
-		return root, nil
-	}
+	// Check if we're in a {something}-wt-N directory (sibling workspace)
+	dirName := filepath.Base(repoRoot)
+	wtPattern := regexp.MustCompile(`^(.+)-wt-\d+$`)
+	matches := wtPattern.FindStringSubmatch(dirName)
+	if matches != nil {
+		// We're in a {projectName}-wt-N workspace
+		// The main repo should be {projectName} in the same parent directory
+		mainProjectName := matches[1]
+		parentDir := filepath.Dir(repoRoot)
+		mainRepoPath := filepath.Join(parentDir, mainProjectName)
 
-	if !info.IsDir() {
-		// .git is a file, we're in a worktree
-		// Read it to find the main repo
-		content, err := os.ReadFile(gitPath)
-		if err != nil {
-			return root, nil
-		}
-		line := strings.TrimSpace(string(content))
-		if strings.HasPrefix(line, "gitdir: ") {
-			gitDir := strings.TrimPrefix(line, "gitdir: ")
-			// Go up from .git/worktrees/<name> to the main repo
-			// gitDir is like /path/to/main/.git/worktrees/<name>
-			mainGit := filepath.Dir(filepath.Dir(gitDir))
-			return filepath.Dir(mainGit), nil
+		// Verify the main repo exists and is a git repo
+		if _, err := os.Stat(filepath.Join(mainRepoPath, ".git")); err == nil {
+			return mainRepoPath, nil
 		}
 	}
 
-	return root, nil
+	return repoRoot, nil
 }

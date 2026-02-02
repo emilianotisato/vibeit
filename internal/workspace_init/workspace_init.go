@@ -1,4 +1,4 @@
-package worktree
+package workspace_init
 
 import (
 	"encoding/json"
@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -27,30 +29,103 @@ const defaultConfig = `{
 }
 `
 
-// Create creates a new worktree with the given branch name
-func Create(repoPath, branchName, baseBranch string) (string, error) {
-	projectName := filepath.Base(repoPath)
-	parentDir := filepath.Dir(repoPath)
-	worktreePath := filepath.Join(parentDir, projectName+"-"+branchName)
+const maxWorkspaces = 9
 
-	// Check if directory already exists
-	if _, err := os.Stat(worktreePath); err == nil {
-		return "", fmt.Errorf("directory already exists: %s", worktreePath)
+// Create creates a new workspace by cloning the main repo into a sibling {projectName}-wt-N directory
+func Create(mainRepoPath, branchName, baseBranch string) (string, error) {
+	parentDir := filepath.Dir(mainRepoPath)
+	projectName := filepath.Base(mainRepoPath)
+
+	// Find next available {projectName}-wt-N slot (1-9)
+	slot, err := findNextSlot(parentDir, projectName)
+	if err != nil {
+		return "", err
 	}
 
-	// Create the worktree
-	args := []string{"worktree", "add", "-b", branchName, worktreePath}
-	if baseBranch != "" {
-		args = append(args, baseBranch)
+	workspacePath := filepath.Join(parentDir, fmt.Sprintf("%s-wt-%d", projectName, slot))
+
+	// Get the origin remote URL from main repo
+	originURL, err := getOriginURL(mainRepoPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to get origin URL: %w", err)
 	}
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repoPath
+
+	// Clone the main repo
+	cmd := exec.Command("git", "clone", mainRepoPath, workspacePath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("git worktree add failed: %s: %w", string(output), err)
+		return "", fmt.Errorf("git clone failed: %s: %w", string(output), err)
 	}
 
-	return worktreePath, nil
+	// Update origin to point to the real remote (not the local clone)
+	cmd = exec.Command("git", "remote", "set-url", "origin", originURL)
+	cmd.Dir = workspacePath
+	if output, err := cmd.CombinedOutput(); err != nil {
+		// Clean up on failure
+		os.RemoveAll(workspacePath)
+		return "", fmt.Errorf("failed to set origin URL: %s: %w", string(output), err)
+	}
+
+	// Create and checkout the new branch from baseBranch
+	var checkoutArgs []string
+	if baseBranch != "" {
+		checkoutArgs = []string{"checkout", "-b", branchName, baseBranch}
+	} else {
+		checkoutArgs = []string{"checkout", "-b", branchName}
+	}
+	cmd = exec.Command("git", checkoutArgs...)
+	cmd.Dir = workspacePath
+	if output, err := cmd.CombinedOutput(); err != nil {
+		// Clean up on failure
+		os.RemoveAll(workspacePath)
+		return "", fmt.Errorf("failed to create branch: %s: %w", string(output), err)
+	}
+
+	return workspacePath, nil
+}
+
+// findNextSlot finds the next available {projectName}-wt-N slot (1-9) in the parent directory
+func findNextSlot(parentDir, projectName string) (int, error) {
+	used := make(map[int]bool)
+
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read directory: %w", err)
+	}
+
+	// Pattern: {projectName}-wt-{N}
+	wtPattern := regexp.MustCompile(`^` + regexp.QuoteMeta(projectName) + `-wt-(\d+)$`)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		matches := wtPattern.FindStringSubmatch(entry.Name())
+		if matches != nil {
+			num, _ := strconv.Atoi(matches[1])
+			if num >= 1 && num <= maxWorkspaces {
+				used[num] = true
+			}
+		}
+	}
+
+	for i := 1; i <= maxWorkspaces; i++ {
+		if !used[i] {
+			return i, nil
+		}
+	}
+
+	return 0, fmt.Errorf("maximum number of workspaces (%d) reached", maxWorkspaces)
+}
+
+// getOriginURL gets the origin remote URL from a git repo
+func getOriginURL(repoPath string) (string, error) {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = repoPath
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 // ConfigPath returns the path to .vibe/wt.json in the main repo.
@@ -83,8 +158,8 @@ func EnsureConfig(repoPath string) (string, bool, error) {
 	return path, true, nil
 }
 
-// Init initializes a worktree by running .vibe/wt.json config
-func Init(mainRepoPath, worktreePath string) error {
+// Init initializes a workspace by running .vibe/wt.json config
+func Init(mainRepoPath, workspacePath string) error {
 	configPath := ConfigPath(mainRepoPath)
 
 	// Check if config exists
@@ -106,7 +181,7 @@ func Init(mainRepoPath, worktreePath string) error {
 
 	// Run before commands
 	for _, cmdStr := range config.Before {
-		if err := runCommand(worktreePath, cmdStr); err != nil {
+		if err := runCommand(workspacePath, cmdStr); err != nil {
 			return fmt.Errorf("before command failed '%s': %w", cmdStr, err)
 		}
 	}
@@ -114,7 +189,7 @@ func Init(mainRepoPath, worktreePath string) error {
 	// Copy files
 	for _, item := range config.Copy {
 		src := filepath.Join(mainRepoPath, item)
-		dst := filepath.Join(worktreePath, item)
+		dst := filepath.Join(workspacePath, item)
 
 		if err := copyPath(src, dst); err != nil {
 			// Log warning but don't fail
@@ -124,89 +199,12 @@ func Init(mainRepoPath, worktreePath string) error {
 
 	// Run after commands
 	for _, cmdStr := range config.After {
-		if err := runCommand(worktreePath, cmdStr); err != nil {
+		if err := runCommand(workspacePath, cmdStr); err != nil {
 			return fmt.Errorf("after command failed '%s': %w", cmdStr, err)
 		}
 	}
 
 	return nil
-}
-
-// Delete removes a worktree, its branch, and optionally the notes file
-func Delete(repoPath, worktreePath, branchName string, deleteNotes bool) error {
-	// Remove the worktree
-	cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
-	cmd.Dir = repoPath
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git worktree remove failed: %s: %w", string(output), err)
-	}
-
-	// Delete the branch
-	cmd = exec.Command("git", "branch", "-D", branchName)
-	cmd.Dir = repoPath
-	// Ignore error if branch doesn't exist
-	cmd.Run()
-
-	// Delete notes file if requested
-	if deleteNotes {
-		parentDir := filepath.Dir(repoPath)
-		projectName := filepath.Base(repoPath)
-		notesPath := filepath.Join(parentDir, projectName+"-"+branchName+".md")
-		os.Remove(notesPath) // Ignore error if doesn't exist
-	}
-
-	return nil
-}
-
-// List returns all worktrees for a repo
-func List(repoPath string) ([]WorktreeInfo, error) {
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	cmd.Dir = repoPath
-	output, err := cmd.Output()
-	if err != nil {
-		return nil, err
-	}
-
-	return parseWorktreeList(string(output), repoPath)
-}
-
-type WorktreeInfo struct {
-	Path   string
-	Branch string
-	IsMain bool
-}
-
-func parseWorktreeList(output, repoPath string) ([]WorktreeInfo, error) {
-	var worktrees []WorktreeInfo
-	var current WorktreeInfo
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			if current.Path != "" {
-				// Determine if this is the main worktree
-				current.IsMain = current.Path == repoPath
-				worktrees = append(worktrees, current)
-				current = WorktreeInfo{}
-			}
-			continue
-		}
-
-		if strings.HasPrefix(line, "worktree ") {
-			current.Path = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "branch refs/heads/") {
-			current.Branch = strings.TrimPrefix(line, "branch refs/heads/")
-		}
-	}
-
-	// Don't forget the last one
-	if current.Path != "" {
-		current.IsMain = current.Path == repoPath
-		worktrees = append(worktrees, current)
-	}
-
-	return worktrees, nil
 }
 
 func runCommand(dir, cmdStr string) error {

@@ -36,7 +36,7 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Println(`vibeit - Worktree-centric vibe coding TUI
+	fmt.Println(`vibeit - Workspace-centric vibe coding TUI
 
 Usage:
   vibeit              Launch the TUI in current directory
@@ -50,6 +50,6 @@ Keybindings (in TUI):
   n                   Open notes
   g                   Open lazygit
   t                   New terminal
-  w                   New worktree
+  w                   New workspace
   q                   Quit / close tab`)
 }

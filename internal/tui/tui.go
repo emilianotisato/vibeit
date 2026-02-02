@@ -15,7 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/emilianotisato/vibeit/internal/mux"
 	"github.com/emilianotisato/vibeit/internal/workspace"
-	"github.com/emilianotisato/vibeit/internal/worktree"
+	workspace_init "github.com/emilianotisato/vibeit/internal/workspace_init"
 )
 
 // Modal types
@@ -23,8 +23,7 @@ type modalType int
 
 const (
 	modalNone modalType = iota
-	modalNewWorktree
-	modalDeleteWorktree
+	modalNewWorkspace
 	modalTabPicker
 	modalTabTypePicker
 )
@@ -154,8 +153,7 @@ type keyMap struct {
 	Neovim      key.Binding
 	Notes       key.Binding
 	Config      key.Binding
-	Worktree    key.Binding
-	Delete      key.Binding
+	Workspace   key.Binding
 	KillSession key.Binding
 	Enter       key.Binding
 	CommandKey  key.Binding
@@ -202,13 +200,9 @@ var keys = keyMap{
 		key.WithKeys("e"),
 		key.WithHelp("e", "wt.json"),
 	),
-	Worktree: key.NewBinding(
+	Workspace: key.NewBinding(
 		key.WithKeys("w"),
-		key.WithHelp("w", "new worktree"),
-	),
-	Delete: key.NewBinding(
-		key.WithKeys("d"),
-		key.WithHelp("d", "delete worktree"),
+		key.WithHelp("w", "new workspace"),
 	),
 	KillSession: key.NewBinding(
 		key.WithKeys("k"),
@@ -247,10 +241,6 @@ type Model struct {
 	baseBranchOptions  []string
 	baseBranchFiltered []string
 	baseBranchIdx      int
-
-	// Delete confirmation
-	deleteConfirm bool
-	deleteNotes   bool
 
 	// Tab picker
 	tabPickerTabs    []string
@@ -303,13 +293,9 @@ type gitStatusMsg struct {
 	err        error
 }
 
-type worktreeCreatedMsg struct {
+type workspaceCreatedMsg struct {
 	path string
 	err  error
-}
-
-type worktreeDeletedMsg struct {
-	err error
 }
 
 func loadWorkspaces() tea.Msg {
@@ -318,7 +304,7 @@ func loadWorkspaces() tea.Msg {
 	workspaces, err := workspace.Detect()
 	configExists := false
 	if projectPath != "" {
-		configExists = worktree.ConfigExists(projectPath)
+		configExists = workspace_init.ConfigExists(projectPath)
 	}
 	return workspacesLoadedMsg{
 		projectName:  projectName,
@@ -329,28 +315,18 @@ func loadWorkspaces() tea.Msg {
 	}
 }
 
-func createWorktree(repoPath, branchName, baseBranch string) tea.Cmd {
+func createWorkspace(repoPath, branchName, baseBranch string) tea.Cmd {
 	return func() tea.Msg {
-		wtPath, err := worktree.Create(repoPath, branchName, baseBranch)
+		wsPath, err := workspace_init.Create(repoPath, branchName, baseBranch)
 		if err != nil {
-			return worktreeCreatedMsg{err: err}
+			return workspaceCreatedMsg{err: err}
 		}
 
-		if initErr := worktree.Init(repoPath, wtPath); initErr != nil {
-			return worktreeCreatedMsg{path: wtPath, err: nil}
+		if initErr := workspace_init.Init(repoPath, wsPath); initErr != nil {
+			return workspaceCreatedMsg{path: wsPath, err: nil}
 		}
 
-		return worktreeCreatedMsg{path: wtPath, err: nil}
-	}
-}
-
-func deleteWorktree(repoPath, wtPath, branchName, sessionName string, deleteNotes bool) tea.Cmd {
-	return func() tea.Msg {
-		err := worktree.Delete(repoPath, wtPath, branchName, deleteNotes)
-		if err == nil && sessionName != "" && mux.SessionExists(sessionName) {
-			_ = mux.DeleteSession(sessionName)
-		}
-		return worktreeDeletedMsg{err: err}
+		return workspaceCreatedMsg{path: wsPath, err: nil}
 	}
 }
 
@@ -358,6 +334,26 @@ func runExternalCmd(cmd *exec.Cmd) tea.Cmd {
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return externalCmdFinishedMsg{err}
 	})
+}
+
+// determineInitialWorkspaceIndex returns the index of the workspace that
+// matches the current working directory, or 0 (main) if no match found
+func determineInitialWorkspaceIndex(workspaces []workspace.Workspace) int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return 0
+	}
+
+	for i, ws := range workspaces {
+		if ws.Path == cwd {
+			return i
+		}
+		// Also check if cwd is a subdirectory of the workspace
+		if strings.HasPrefix(cwd, ws.Path+string(os.PathSeparator)) {
+			return i
+		}
+	}
+	return 0
 }
 
 func scheduleGitStatusTick() tea.Cmd {
@@ -402,6 +398,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.workspaces) == 0 && m.err == nil {
 			m.err = fmt.Errorf("not a git repository")
 		}
+		// Auto-select workspace based on cwd on initial load
+		if !m.gitPollActive {
+			m.activeIdx = determineInitialWorkspaceIndex(m.workspaces)
+		}
 		cmds := []tea.Cmd{
 			refreshGitStatus(m.workspaces, m.projectPath, m.projectName),
 		}
@@ -438,27 +438,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, scheduleGitStatusTick()
 
-	case worktreeCreatedMsg:
+	case workspaceCreatedMsg:
 		m.modal = modalNone
 		m.branchInput.SetValue("")
 		m.baseBranchInput.SetValue("")
 		if msg.err != nil {
 			m.statusMessage = errorStyle.Render(fmt.Sprintf("Error: %v", msg.err))
 		} else {
-			m.statusMessage = successStyle.Render(fmt.Sprintf("Created worktree: %s", filepath.Base(msg.path)))
-		}
-		return m, loadWorkspaces
-
-	case worktreeDeletedMsg:
-		m.modal = modalNone
-		m.deleteConfirm = false
-		if msg.err != nil {
-			m.statusMessage = errorStyle.Render(fmt.Sprintf("Error: %v", msg.err))
-		} else {
-			m.statusMessage = successStyle.Render("Worktree deleted")
-			if m.activeIdx >= len(m.workspaces)-1 && m.activeIdx > 0 {
-				m.activeIdx--
-			}
+			m.statusMessage = successStyle.Render(fmt.Sprintf("Created workspace: %s", filepath.Base(msg.path)))
 		}
 		return m, loadWorkspaces
 
@@ -525,10 +512,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, keys.Config):
-			return m.openWorktreeConfig()
+			return m.openWorkspaceConfig()
 
-		case key.Matches(msg, keys.Worktree):
-			m.modal = modalNewWorktree
+		case key.Matches(msg, keys.Workspace):
+			m.modal = modalNewWorkspace
 			m.branchInput.SetValue("")
 			branches, err := workspace.ListBranches(m.workspaces[m.activeIdx].Path)
 			if err != nil {
@@ -546,19 +533,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeInput = 0
 			m.modalError = ""
 			return m, textinput.Blink
-
-		case key.Matches(msg, keys.Delete):
-			if len(m.workspaces) > 0 {
-				ws := m.workspaces[m.activeIdx]
-				if ws.IsWorktree {
-					m.modal = modalDeleteWorktree
-					m.deleteConfirm = false
-					m.deleteNotes = false
-					m.modalError = ""
-				} else {
-					m.statusMessage = "Cannot delete main workspace"
-				}
-			}
 
 		case key.Matches(msg, keys.KillSession):
 			if len(m.workspaces) > 0 {
@@ -667,13 +641,13 @@ func (m Model) openNotes() (tea.Model, tea.Cmd) {
 	return m, runExternalCmd(cmd)
 }
 
-func (m Model) openWorktreeConfig() (tea.Model, tea.Cmd) {
+func (m Model) openWorkspaceConfig() (tea.Model, tea.Cmd) {
 	if m.projectPath == "" {
 		m.statusMessage = errorStyle.Render("Cannot locate repository path")
 		return m, nil
 	}
 
-	configPath, created, err := worktree.EnsureConfig(m.projectPath)
+	configPath, created, err := workspace_init.EnsureConfig(m.projectPath)
 	if err != nil {
 		m.statusMessage = errorStyle.Render(fmt.Sprintf("Failed to open wt.json: %v", err))
 		return m, nil
@@ -689,7 +663,7 @@ func (m Model) openWorktreeConfig() (tea.Model, tea.Cmd) {
 
 func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.modal {
-	case modalNewWorktree:
+	case modalNewWorkspace:
 		switch msg.String() {
 		case "esc":
 			m.modal = modalNone
@@ -712,7 +686,7 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if baseBranch == "" {
 				baseBranch = m.workspaces[m.activeIdx].Branch
 			}
-			return m, createWorktree(m.projectPath, branchName, baseBranch)
+			return m, createWorkspace(m.projectPath, branchName, baseBranch)
 		case "up", "k":
 			if m.activeInput == 1 && m.baseBranchIdx > 0 {
 				m.baseBranchIdx--
@@ -743,28 +717,6 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.updateBaseBranchFilter()
 			}
 			return m, cmd
-		}
-
-	case modalDeleteWorktree:
-		switch msg.String() {
-		case "esc":
-			m.modal = modalNone
-			return m, nil
-		case "y", "Y":
-			if !m.deleteConfirm {
-				m.deleteConfirm = true
-				return m, nil
-			}
-			ws := m.workspaces[m.activeIdx]
-			sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
-			return m, deleteWorktree(m.projectPath, ws.Path, ws.Branch, sessionName, m.deleteNotes)
-		case "n", "N":
-			if m.deleteConfirm {
-				m.deleteNotes = !m.deleteNotes
-			} else {
-				m.modal = modalNone
-			}
-			return m, nil
 		}
 
 	case modalTabPicker:
@@ -915,10 +867,8 @@ func (m Model) renderWithModal(background string) string {
 	var modal string
 
 	switch m.modal {
-	case modalNewWorktree:
-		modal = m.renderNewWorktreeModal()
-	case modalDeleteWorktree:
-		modal = m.renderDeleteWorktreeModal()
+	case modalNewWorkspace:
+		modal = m.renderNewWorkspaceModal()
 	case modalTabPicker:
 		modal = m.renderTabPickerModal()
 	case modalTabTypePicker:
@@ -950,10 +900,10 @@ func (m Model) renderWithModal(background string) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) renderNewWorktreeModal() string {
+func (m Model) renderNewWorkspaceModal() string {
 	var content strings.Builder
 
-	content.WriteString(modalTitleStyle.Render("New Worktree"))
+	content.WriteString(modalTitleStyle.Render("New Workspace"))
 	content.WriteString("\n\n")
 	content.WriteString("Branch name:\n")
 	content.WriteString(m.branchInput.View())
@@ -1026,37 +976,6 @@ func (m Model) renderBaseBranchOptions() string {
 	}
 
 	return content.String()
-}
-
-func (m Model) renderDeleteWorktreeModal() string {
-	var content strings.Builder
-
-	ws := m.workspaces[m.activeIdx]
-
-	content.WriteString(modalTitleStyle.Render("Delete Worktree"))
-	content.WriteString("\n\n")
-
-	if !m.deleteConfirm {
-		content.WriteString(fmt.Sprintf("Delete worktree '%s'?\n\n", ws.Name))
-		content.WriteString(fmt.Sprintf("  Path: %s\n", ws.Path))
-		content.WriteString(fmt.Sprintf("  Branch: %s\n", ws.Branch))
-		content.WriteString("\n")
-		content.WriteString(modalHintStyle.Render("Y to confirm • N to cancel"))
-	} else {
-		content.WriteString("Also delete notes file?\n\n")
-		notesPath := notesPath(m.projectPath, m.projectName, ws.Branch)
-		content.WriteString(fmt.Sprintf("  %s\n", notesPath))
-		content.WriteString("\n")
-		deleteNotesStr := "No"
-		if m.deleteNotes {
-			deleteNotesStr = "Yes"
-		}
-		content.WriteString(fmt.Sprintf("Delete notes: %s\n", deleteNotesStr))
-		content.WriteString("\n")
-		content.WriteString(modalHintStyle.Render("N to toggle • Y to delete"))
-	}
-
-	return modalStyle.Render(content.String())
 }
 
 func (m Model) renderTabPickerModal() string {
@@ -1192,8 +1111,8 @@ func (m Model) renderMainContent(height int) string {
 func (m Model) renderWorkspacePanel(ws workspace.Workspace, width int) string {
 	labelWidth := 8
 	wtType := "main repo"
-	if ws.IsWorktree {
-		wtType = "worktree"
+	if ws.IsSubWorkspace {
+		wtType = "sub-workspace"
 	}
 
 	sessionName := mux.SessionName(m.projectName, ws.Name, ws.Branch)
@@ -1496,9 +1415,9 @@ func isManagedTabName(name string) bool {
 	return false
 }
 
-func notesPath(projectPath, projectName, branch string) string {
+func notesPath(projectPath, projectName, _ string) string {
 	parentDir := filepath.Dir(projectPath)
-	notesFile := fmt.Sprintf("%s-%s.md", projectName, branch)
+	notesFile := fmt.Sprintf("%s.md", projectName)
 	return filepath.Join(parentDir, notesFile)
 }
 
@@ -1540,8 +1459,7 @@ func (m Model) renderFooter() string {
 		{"t", "term"},
 		{"n", "notes"},
 		{"e", "wt.json"},
-		{"w", "new wt"},
-		{"d", "del wt"},
+		{"w", "new ws"},
 		{"k", "kill ses"},
 		{"enter", "tabs"},
 		{"q", "quit"},
