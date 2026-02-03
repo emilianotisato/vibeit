@@ -26,6 +26,8 @@ const (
 	modalNewWorkspace
 	modalTabPicker
 	modalTabTypePicker
+	modalMdLuncherFolder
+	modalMdLuncherSelect
 )
 
 const gitPollInterval = 5 * time.Second
@@ -157,6 +159,7 @@ type keyMap struct {
 	KillSession key.Binding
 	Enter       key.Binding
 	CommandKey  key.Binding
+	MdLuncher   key.Binding
 }
 
 var keys = keyMap{
@@ -216,6 +219,10 @@ var keys = keyMap{
 		key.WithKeys("ctrl+\\"),
 		key.WithHelp("C-\\", "command mode"),
 	),
+	MdLuncher: key.NewBinding(
+		key.WithKeys("o"),
+		key.WithHelp("o", "open md"),
+	),
 }
 
 type Model struct {
@@ -250,6 +257,12 @@ type Model struct {
 	tabTypePickerIdx int
 
 	showTabPickerOnReturn bool
+
+	// Md-luncher modal
+	mdLuncherFolderInput textinput.Model
+	mdLuncherFiles       []string
+	mdLuncherIdx         int
+	mdLuncherError       string
 }
 
 func initialModel() Model {
@@ -263,13 +276,19 @@ func initialModel() Model {
 	baseBranchInput.CharLimit = 50
 	baseBranchInput.Width = 40
 
+	mdLuncherFolderInput := textinput.New()
+	mdLuncherFolderInput.Placeholder = "docs"
+	mdLuncherFolderInput.CharLimit = 100
+	mdLuncherFolderInput.Width = 40
+
 	return Model{
-		projectName:     "loading...",
-		workspaces:      []workspace.Workspace{},
-		activeIdx:       0,
-		branchInput:     branchInput,
-		baseBranchInput: baseBranchInput,
-		activeInput:     0,
+		projectName:          "loading...",
+		workspaces:           []workspace.Workspace{},
+		activeIdx:            0,
+		branchInput:          branchInput,
+		baseBranchInput:      baseBranchInput,
+		activeInput:          0,
+		mdLuncherFolderInput: mdLuncherFolderInput,
 	}
 }
 
@@ -514,6 +533,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Config):
 			return m.openWorkspaceConfig()
 
+		case key.Matches(msg, keys.MdLuncher):
+			if len(m.workspaces) > 0 {
+				m.modal = modalMdLuncherFolder
+				m.mdLuncherFolderInput.SetValue("docs")
+				m.mdLuncherFolderInput.Focus()
+				m.mdLuncherError = ""
+				return m, textinput.Blink
+			}
+
 		case key.Matches(msg, keys.Workspace):
 			m.modal = modalNewWorkspace
 			m.branchInput.SetValue("")
@@ -724,6 +752,12 @@ func (m Model) handleModalInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case modalTabTypePicker:
 		return m.handleTabTypePickerInput(msg)
+
+	case modalMdLuncherFolder:
+		return m.handleMdLuncherFolderInput(msg)
+
+	case modalMdLuncherSelect:
+		return m.handleMdLuncherSelectInput(msg)
 	}
 
 	return m, nil
@@ -836,6 +870,102 @@ func (m Model) handleTabTypePickerInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleMdLuncherFolderInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.modal = modalNone
+		return m, nil
+
+	case "enter":
+		folder := strings.TrimSpace(m.mdLuncherFolderInput.Value())
+		if folder == "" {
+			folder = "docs"
+		}
+
+		ws := m.workspaces[m.activeIdx]
+		folderPath := filepath.Join(ws.Path, folder)
+
+		files, err := scanMarkdownFiles(folderPath)
+		if err != nil {
+			m.mdLuncherError = fmt.Sprintf("Folder '%s' not found", folder)
+			return m, nil
+		}
+
+		if len(files) == 0 {
+			m.mdLuncherError = fmt.Sprintf("No .md files found in '%s'", folder)
+			return m, nil
+		}
+
+		m.mdLuncherFiles = files
+		m.mdLuncherIdx = 0
+		m.mdLuncherError = ""
+		m.modal = modalMdLuncherSelect
+		return m, nil
+
+	default:
+		var cmd tea.Cmd
+		m.mdLuncherFolderInput, cmd = m.mdLuncherFolderInput.Update(msg)
+		m.mdLuncherError = ""
+		return m, cmd
+	}
+}
+
+func (m Model) handleMdLuncherSelectInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.modal = modalMdLuncherFolder
+		return m, nil
+
+	case "up", "k":
+		if m.mdLuncherIdx > 0 {
+			m.mdLuncherIdx--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.mdLuncherIdx < len(m.mdLuncherFiles)-1 {
+			m.mdLuncherIdx++
+		}
+		return m, nil
+
+	case "enter":
+		if len(m.mdLuncherFiles) == 0 {
+			return m, nil
+		}
+
+		selectedFile := m.mdLuncherFiles[m.mdLuncherIdx]
+		m.modal = modalNone
+
+		cmd := exec.Command("omarchy-launch-browser", selectedFile)
+		return m, runExternalCmd(cmd)
+	}
+
+	return m, nil
+}
+
+func scanMarkdownFiles(dir string) ([]string, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("not a directory")
+	}
+
+	var files []string
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".md") {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	return files, err
+}
+
 func (m Model) View() string {
 	if !m.ready {
 		return "Loading..."
@@ -873,6 +1003,10 @@ func (m Model) renderWithModal(background string) string {
 		modal = m.renderTabPickerModal()
 	case modalTabTypePicker:
 		modal = m.renderTabTypePickerModal()
+	case modalMdLuncherFolder:
+		modal = m.renderMdLuncherFolderModal()
+	case modalMdLuncherSelect:
+		modal = m.renderMdLuncherSelectModal()
 	}
 
 	lines := strings.Split(background, "\n")
@@ -1027,6 +1161,82 @@ func (m Model) renderTabTypePickerModal() string {
 	}
 
 	content.WriteString(modalHintStyle.Render("Enter to create • Esc to go back"))
+	return modalStyle.Render(content.String())
+}
+
+func (m Model) renderMdLuncherFolderModal() string {
+	var content strings.Builder
+
+	content.WriteString(modalTitleStyle.Render("Open Markdown"))
+	content.WriteString("\n\n")
+	content.WriteString("Folder to scan:\n")
+	content.WriteString(m.mdLuncherFolderInput.View())
+
+	if m.mdLuncherError != "" {
+		content.WriteString("\n\n")
+		content.WriteString(errorStyle.Render(m.mdLuncherError))
+	}
+
+	content.WriteString("\n\n")
+	content.WriteString(modalHintStyle.Render("Enter to scan • Esc to cancel"))
+
+	return modalStyle.Render(content.String())
+}
+
+func (m Model) renderMdLuncherSelectModal() string {
+	var content strings.Builder
+
+	content.WriteString(modalTitleStyle.Render(fmt.Sprintf("Select file (%d found)", len(m.mdLuncherFiles))))
+	content.WriteString("\n\n")
+
+	// Show a scrolling window of files
+	maxVisible := 10
+	total := len(m.mdLuncherFiles)
+
+	start := 0
+	if m.mdLuncherIdx >= maxVisible {
+		start = m.mdLuncherIdx - maxVisible + 1
+	}
+	end := start + maxVisible
+	if end > total {
+		end = total
+		start = end - maxVisible
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	if start > 0 {
+		content.WriteString(helpTextStyle.Render(fmt.Sprintf("  ...%d above", start)))
+		content.WriteString("\n")
+	}
+
+	for i := start; i < end; i++ {
+		// Show relative path from workspace for readability
+		displayName := filepath.Base(m.mdLuncherFiles[i])
+		// Include parent folder if nested
+		dir := filepath.Dir(m.mdLuncherFiles[i])
+		parentDir := filepath.Base(dir)
+		if parentDir != "." && parentDir != "/" {
+			displayName = parentDir + "/" + displayName
+		}
+
+		prefix := "  "
+		if i == m.mdLuncherIdx {
+			prefix = "> "
+			content.WriteString(modalItemSelectedStyle.Render(prefix + displayName))
+		} else {
+			content.WriteString(modalItemStyle.Render(prefix + displayName))
+		}
+		content.WriteString("\n")
+	}
+
+	if end < total {
+		content.WriteString(helpTextStyle.Render(fmt.Sprintf("  ...%d more", total-end)))
+		content.WriteString("\n")
+	}
+
+	content.WriteString(modalHintStyle.Render("Enter to open • Esc to go back"))
 	return modalStyle.Render(content.String())
 }
 
@@ -1476,6 +1686,7 @@ func (m Model) renderFooter() string {
 		{"v", "nvim"},
 		{"t", "term"},
 		{"n", "notes"},
+		{"o", "open md"},
 		{"e", "wt.json"},
 		{"w", "new ws"},
 		{"k", "kill ses"},
