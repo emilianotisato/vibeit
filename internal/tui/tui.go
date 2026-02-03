@@ -1035,7 +1035,16 @@ func (m Model) renderTopBar() string {
 
 	var tabs []string
 	for i, ws := range m.workspaces {
-		name := ws.Name
+		// Show branch name with folder reference for sub-workspaces
+		var name string
+		if ws.IsSubWorkspace {
+			// Extract wt-N from folder name (e.g., "vibeit-wt-1" -> "1")
+			wtNum := extractWtNumber(ws.Name)
+			name = fmt.Sprintf("%s(%s)", ws.Branch, wtNum)
+		} else {
+			name = ws.Branch
+		}
+
 		if ws.IsDirty {
 			name += dirtyIndicator.String()
 		}
@@ -1445,6 +1454,15 @@ func statusText(ws workspace.Workspace) string {
 		return "dirty"
 	}
 	return "clean"
+}
+
+// extractWtNumber extracts the workspace number from a folder name like "project-wt-1" -> "1"
+func extractWtNumber(folderName string) string {
+	idx := strings.LastIndex(folderName, "-wt-")
+	if idx == -1 {
+		return "?"
+	}
+	return folderName[idx+4:]
 }
 
 func (m Model) renderFooter() string {
