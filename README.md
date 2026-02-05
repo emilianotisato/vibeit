@@ -94,6 +94,7 @@ vibeit
 | `d` | Delete worktree |
 | `k` | Kill tmux session |
 | `Ctrl+\` | Command mode (detach from tmux) |
+| `F9` | Toggle tmux overview grid (managed windows) |
 | `q` | Quit |
 
 ### Workflow

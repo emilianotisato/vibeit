@@ -46,6 +46,7 @@ const (
 
 const defaultDetachKey = "C-\\"
 const defaultLastWindowKey = "C-]"
+const defaultOverviewKey = "F9"
 
 // TabCommand returns the command to run for a tab type
 func TabCommand(tabType TabType) string {
@@ -292,6 +293,12 @@ func ensureDetachBindingScript() string {
 		script += fmt.Sprintf("tmux bind-key -n %q last-window 2>/dev/null; ", key)
 	}
 
+	// Toggle temporary overview grid for managed windows
+	if key := tmuxOverviewKey(); key != "" {
+		overviewCmd := tmuxOverviewCmd()
+		script += fmt.Sprintf("tmux bind-key -n %q run-shell %q 2>/dev/null; ", key, overviewCmd)
+	}
+
 	return script
 }
 
@@ -313,4 +320,22 @@ func tmuxLastWindowKey() string {
 		return value
 	}
 	return defaultLastWindowKey
+}
+
+func tmuxOverviewKey() string {
+	if value := strings.TrimSpace(os.Getenv("VIBEIT_TMUX_OVERVIEW_KEY")); value != "" {
+		if strings.EqualFold(value, "off") || strings.EqualFold(value, "none") {
+			return ""
+		}
+		return value
+	}
+	return defaultOverviewKey
+}
+
+func tmuxOverviewCmd() string {
+	exePath, err := os.Executable()
+	if err != nil || exePath == "" {
+		return "vibeit tmux-overview"
+	}
+	return fmt.Sprintf("%s tmux-overview", exePath)
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/emilianotisato/vibeit/internal/doctor"
+	"github.com/emilianotisato/vibeit/internal/mux"
 	"github.com/emilianotisato/vibeit/internal/tui"
 )
 
@@ -15,6 +16,12 @@ func main() {
 		switch os.Args[1] {
 		case "doctor":
 			os.Exit(doctor.Run())
+		case "tmux-overview":
+			if err := mux.ToggleOverview(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			os.Exit(0)
 		case "version", "--version", "-v":
 			fmt.Printf("vibeit %s\n", version)
 			os.Exit(0)
