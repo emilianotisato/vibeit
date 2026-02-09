@@ -2,7 +2,9 @@ package doctor
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -34,6 +36,8 @@ func Run() int {
 			allOk = false
 		}
 	}
+
+	printTmuxDetachStatus()
 
 	fmt.Println()
 
@@ -160,4 +164,62 @@ func printInstallInstructions() {
 	fmt.Println("  # lazygit: https://github.com/jesseduffield/lazygit#installation")
 	fmt.Println()
 	fmt.Println("For more info, visit: https://github.com/emilianotisato/vibeit")
+}
+
+func printTmuxDetachStatus() {
+	fmt.Println()
+	fmt.Println("Tmux keybinding check:")
+
+	ok, source := checkTmuxDetachBinding()
+	if ok {
+		fmt.Printf("  ✓ Ctrl+\\\\ detach binding found (%s)\n", source)
+	} else {
+		fmt.Println("  ⚠ Ctrl+\\ detach binding not detected")
+		fmt.Println("    Add to ~/.tmux.conf: bind-key -n C-\\\\ detach-client")
+		fmt.Println("    Then reload: tmux source-file ~/.tmux.conf")
+	}
+
+	fmt.Println("  Verify: tmux list-keys -T root | grep -F 'C-\\\\'")
+}
+
+func checkTmuxDetachBinding() (bool, string) {
+	// First check the live tmux root table (if a server is running).
+	cmd := exec.Command("tmux", "list-keys", "-T", "root")
+	out, err := cmd.Output()
+	if err == nil {
+		if hasDetachBinding(string(out)) {
+			return true, "running tmux server"
+		}
+		return false, "running tmux server"
+	}
+
+	// If no server is running, check persisted config for the canonical binding.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, "unable to resolve home directory"
+	}
+	confPath := home + "/.tmux.conf"
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return false, "~/.tmux.conf not found"
+	}
+	if hasDetachBinding(string(data)) {
+		return true, "~/.tmux.conf"
+	}
+	return false, "~/.tmux.conf"
+}
+
+func hasDetachBinding(text string) bool {
+	// Accept both config lines (`bind-key -n C-\\ detach-client`) and
+	// `tmux list-keys` output (`bind-key -T root C-\\ detach-client`).
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)^\s*bind(?:-key)?\s+-n\s+C-\\+\s+detach-client\b`),
+		regexp.MustCompile(`(?m)^\s*bind-key\s+-T\s+root\s+C-\\+\s+detach-client\b`),
+	}
+	for _, re := range patterns {
+		if re.MatchString(text) {
+			return true
+		}
+	}
+	return false
 }

@@ -97,6 +97,34 @@ vibeit
 | `F9` | Toggle tmux overview grid (managed windows) |
 | `q` | Quit |
 
+### Keep `Ctrl+\` Stable Across Updates
+
+Some OS/terminal updates can change how `Ctrl+\` is emitted. To keep detach stable:
+
+1. Add this to `~/.tmux.conf`:
+
+```tmux
+bind-key -n C-\\ detach-client
+```
+
+2. If you use Ghostty, add this to `~/.config/ghostty/config`:
+
+```conf
+keybind = ctrl+backslash=text:\x1c
+```
+
+3. Reload tmux config:
+
+```bash
+tmux source-file ~/.tmux.conf
+```
+
+4. Verify binding is active:
+
+```bash
+tmux list-keys -T root | grep -F 'C-\\'
+```
+
 ### Workflow
 
 1. Run `vibeit` in your project root
